@@ -43,9 +43,6 @@ from checkers.cpp import CppChecker
 from checkers.cmake import CMakeChecker
 from checkers.featuredefines import FeatureDefinesChecker
 from checkers.js import JSChecker
-from checkers.jsonchecker import JSONChecker
-from checkers.jsonchecker import JSONContributorsChecker
-from checkers.jsonchecker import JSONFeaturesChecker
 from checkers.messagesin import MessagesInChecker
 from checkers.png import PNGChecker
 from checkers.python import PythonChecker
@@ -356,7 +353,6 @@ def _all_categories():
     # Take the union across all checkers.
     categories = CommonCategories.union(CppChecker.categories)
     categories = categories.union(JSChecker.categories)
-    categories = categories.union(JSONChecker.categories)
     categories = categories.union(TestExpectationsChecker.categories)
     categories = categories.union(ChangeLogChecker.categories)
     categories = categories.union(PNGChecker.categories)

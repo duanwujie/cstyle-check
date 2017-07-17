@@ -1,8 +1,9 @@
+#!/usr/bin/python
 # -*- coding: utf-8 -*-
 #
-# Copyright (C) 2009, 2010, 2012 Google Inc. All rights reserved.
+# Copyright (C) 2009 Google Inc. All rights reserved.
 # Copyright (C) 2009 Torch Mobile Inc.
-# Copyright (C) 2009, 2013 Apple Inc. All rights reserved.
+# Copyright (C) 2009 Apple Inc. All rights reserved.
 # Copyright (C) 2010 Chris Jerdonek (cjerdonek@webkit.org)
 #
 # Redistribution and use in source and binary forms, with or without
@@ -41,15 +42,11 @@ import math  # for log
 import os
 import os.path
 import re
+import sre_compile
 import string
 import sys
 import unicodedata
 
-from common import match, search, sub, subn
-from webkitpy.common.memoized import memoized
-
-# The key to use to provide a class to fake loading a header file.
-INCLUDE_IO_INJECTION_KEY = 'include_header_io'
 
 # Headers that we consider STL headers.
 _STL_HEADERS = frozenset([
@@ -118,14 +115,41 @@ for op, inv_replacement in [('==', 'NE'), ('!=', 'EQ'),
 _CONFIG_HEADER = 0
 _PRIMARY_HEADER = 1
 _OTHER_HEADER = 2
-_SOFT_LINK_HEADER = 3
-_MOC_HEADER = 4
+_MOC_HEADER = 3
 
 
-# A dictionary of items customize behavior for unit test. For example,
-# INCLUDE_IO_INJECTION_KEY allows providing a custom io class which allows
-# for faking a header file.
-_unit_test_config = {}
+# The regexp compilation caching is inlined in all regexp functions for
+# performance reasons; factoring it out into a separate function turns out
+# to be noticeably expensive.
+_regexp_compile_cache = {}
+
+
+def match(pattern, s):
+    """Matches the string with the pattern, caching the compiled regexp."""
+    if not pattern in _regexp_compile_cache:
+        _regexp_compile_cache[pattern] = sre_compile.compile(pattern)
+    return _regexp_compile_cache[pattern].match(s)
+
+
+def search(pattern, s):
+    """Searches the string for the pattern, caching the compiled regexp."""
+    if not pattern in _regexp_compile_cache:
+        _regexp_compile_cache[pattern] = sre_compile.compile(pattern)
+    return _regexp_compile_cache[pattern].search(s)
+
+
+def sub(pattern, replacement, s):
+    """Substitutes occurrences of a pattern, caching the compiled regexp."""
+    if not pattern in _regexp_compile_cache:
+        _regexp_compile_cache[pattern] = sre_compile.compile(pattern)
+    return _regexp_compile_cache[pattern].sub(replacement, s)
+
+
+def subn(pattern, replacement, s):
+    """Substitutes occurrences of a pattern, caching the compiled regexp."""
+    if not pattern in _regexp_compile_cache:
+        _regexp_compile_cache[pattern] = sre_compile.compile(pattern)
+    return _regexp_compile_cache[pattern].subn(replacement, s)
 
 
 def iteratively_replace_matches_with_char(pattern, char_replacement, s):
@@ -158,59 +182,6 @@ def iteratively_replace_matches_with_char(pattern, char_replacement, s):
         end_match_index = matched.end(0)
         match_length = end_match_index - start_match_index
         s = s[:start_match_index] + char_replacement * match_length + s[end_match_index:]
-
-
-def _rfind_in_lines(regex, lines, start_position, not_found_position):
-    """Does a reverse find starting at start position and going backwards until
-    a match is found.
-
-    Returns the position where the regex ended.
-    """
-    # Put the regex in a group and proceed it with a greedy expression that
-    # matches anything to ensure that we get the last possible match in a line.
-    last_in_line_regex = r'.*(' + regex + ')'
-    current_row = start_position.row
-
-    # Start with the given row and trim off everything past what may be matched.
-    current_line = lines[start_position.row][:start_position.column]
-    while True:
-        found_match = match(last_in_line_regex, current_line)
-        if found_match:
-            return Position(current_row, found_match.end(1))
-
-        # A match was not found so continue backward.
-        current_row -= 1
-        if current_row < 0:
-            return not_found_position
-        current_line = lines[current_row]
-
-
-def _convert_to_lower_with_underscores(text):
-    """Converts all text strings in camelCase or PascalCase to lowers with underscores."""
-
-    # First add underscores before any capital letter followed by a lower case letter
-    # as long as it is in a word.
-    # (This put an underscore before Password but not P and A in WPAPassword).
-    text = sub(r'(?<=[A-Za-z0-9])([A-Z])(?=[a-z])', r'_\1', text)
-
-    # Next add underscores before capitals at the end of words if it was
-    # preceeded by lower case letter or number.
-    # (This puts an underscore before A in isA but not A in CBA).
-    text = sub(r'(?<=[a-z0-9])([A-Z])(?=\b)', r'_\1', text)
-
-    # Next add underscores when you have a captial letter which is followed by a capital letter
-    # but is not proceeded by one. (This puts an underscore before A in 'WordADay').
-    text = sub(r'(?<=[a-z0-9])([A-Z][A-Z_])', r'_\1', text)
-
-    return text.lower()
-
-
-
-def _create_acronym(text):
-    """Creates an acronym for the given text."""
-    # Removes all lower case letters except those starting words.
-    text = sub(r'(?<!\b)[a-z]', '', text)
-    return text.upper()
 
 
 def up_to_unmatched_closing_paren(s):
@@ -255,13 +226,11 @@ class _IncludeState(dict):
     _CONFIG_SECTION = 1
     _PRIMARY_SECTION = 2
     _OTHER_SECTION = 3
-    _SOFT_LINK_SECTION = 4
 
     _TYPE_NAMES = {
         _CONFIG_HEADER: 'WebCore config.h',
         _PRIMARY_HEADER: 'header this file implements',
         _OTHER_HEADER: 'other header',
-        _SOFT_LINK_HEADER: '*SoftLink.h header',
         _MOC_HEADER: 'moc file',
         }
     _SECTION_NAMES = {
@@ -269,23 +238,18 @@ class _IncludeState(dict):
         _CONFIG_SECTION: "WebCore config.h.",
         _PRIMARY_SECTION: 'a header this file implements.',
         _OTHER_SECTION: 'other header.',
-        _SOFT_LINK_SECTION: 'soft-link header section.',
         }
 
     def __init__(self):
         dict.__init__(self)
         self._section = self._INITIAL_SECTION
         self._visited_primary_section = False
-        self._visited_soft_link_section = False
-        self.header_types = dict()
+        self.header_types = dict();
 
     def visited_primary_section(self):
         return self._visited_primary_section
 
-    def visited_soft_link_section(self):
-        return self._visited_soft_link_section
-
-    def check_next_include_order(self, header_type, filename, file_is_header, primary_header_exists):
+    def check_next_include_order(self, header_type, file_is_header):
         """Returns a non-empty error message if the next header is out of order.
 
         This function also updates the internal state to be ready to check
@@ -293,9 +257,7 @@ class _IncludeState(dict):
 
         Args:
           header_type: One of the _XXX_HEADER constants defined above.
-          filename: The name of the current file.
           file_is_header: Whether the file that owns this _IncludeState is itself a header
-          primary_header_exists: Whether the primary header file actually exists on disk
 
         Returns:
           The empty string if the header is in the right order, or an
@@ -310,7 +272,7 @@ class _IncludeState(dict):
             return ''
 
         error_message = ''
-        if self._section < self._OTHER_SECTION:
+        if self._section != self._OTHER_SECTION:
             before_error_message = ('Found %s before %s' %
                                     (self._TYPE_NAMES[header_type],
                                      self._SECTION_NAMES[self._section + 1]))
@@ -329,161 +291,13 @@ class _IncludeState(dict):
                 error_message = before_error_message
             self._section = self._PRIMARY_SECTION
             self._visited_primary_section = True
-        elif header_type == _OTHER_HEADER:
-            if not file_is_header and self._section < self._PRIMARY_SECTION:
-                if primary_header_exists and not filename.endswith('SoftLink.cpp'):
-                    error_message = before_error_message
-            self._section = self._OTHER_SECTION
         else:
-            assert header_type == _SOFT_LINK_HEADER
-            if file_is_header:
-                error_message = '{} should never be included in a header.'.format(
-                    self._TYPE_NAMES[header_type])
-            self._section = self._SOFT_LINK_SECTION
-            self._visited_soft_link_section = True
-
-        if not error_message and self.visited_soft_link_section() and header_type != _SOFT_LINK_HEADER:
-            error_message = '*SoftLink.h header should be included after all other headers.'
+            assert header_type == _OTHER_HEADER
+            if not file_is_header and self._section < self._PRIMARY_SECTION:
+                error_message = before_error_message
+            self._section = self._OTHER_SECTION
 
         return error_message
-
-
-class Position(object):
-    """Holds the position of something."""
-    def __init__(self, row, column):
-        self.row = row
-        self.column = column
-
-    def __str__(self):
-        return '(%s, %s)' % (self.row, self.column)
-
-    def __cmp__(self, other):
-        return self.row.__cmp__(other.row) or self.column.__cmp__(other.column)
-
-
-class Parameter(object):
-    """Information about one function parameter."""
-    def __init__(self, parameter, parameter_name_index, row):
-        self.type = parameter[:parameter_name_index].strip()
-        # Remove any initializers from the parameter name (e.g. int i = 5).
-        self.name = sub(r'=.*', '', parameter[parameter_name_index:]).strip()
-        self.row = row
-
-    @memoized
-    def lower_with_underscores_name(self):
-        """Returns the parameter name in the lower with underscores format."""
-        return _convert_to_lower_with_underscores(self.name)
-
-
-class SingleLineView(object):
-    """Converts multiple lines into a single line (with line breaks replaced by a
-       space) to allow for easier searching."""
-    def __init__(self, lines, start_position, end_position):
-        """Create a SingleLineView instance.
-
-        Args:
-          lines: a list of multiple lines to combine into a single line.
-          start_position: offset within lines of where to start the single line.
-          end_position: just after where to end (like a slice operation).
-        """
-        # Get the rows of interest.
-        trimmed_lines = lines[start_position.row:end_position.row + 1]
-
-        # Remove the columns on the last line that aren't included.
-        trimmed_lines[-1] = trimmed_lines[-1][:end_position.column]
-
-        # Remove the columns on the first line that aren't included.
-        trimmed_lines[0] = trimmed_lines[0][start_position.column:]
-
-        # Create a single line with all of the parameters.
-        self.single_line = ' '.join(trimmed_lines)
-
-        # Keep the row lengths, so we can calculate the original row number
-        # given a column in the single line (adding 1 due to the space added
-        # during the join).
-        self._row_lengths = [len(line) + 1 for line in trimmed_lines]
-        self._starting_row = start_position.row
-
-    def convert_column_to_row(self, single_line_column_number):
-        """Convert the column number from the single line into the original
-        line number.
-
-        Special cases:
-        * Columns in the added spaces are considered part of the previous line.
-        * Columns beyond the end of the line are consider part the last line
-        in the view."""
-        total_columns = 0
-        row_offset = 0
-        while row_offset < len(self._row_lengths) - 1 and single_line_column_number >= total_columns + self._row_lengths[row_offset]:
-            total_columns += self._row_lengths[row_offset]
-            row_offset += 1
-        return self._starting_row + row_offset
-
-
-def create_skeleton_parameters(all_parameters):
-    """Converts a parameter list to a skeleton version.
-
-    The skeleton only has one word for the parameter name, one word for the type,
-    and commas after each parameter and only there. Everything in the skeleton
-    remains in the same columns as the original."""
-    all_simplifications = (
-        # Remove template parameters, function declaration parameters, etc.
-        r'(<[^<>]*?>)|(\([^\(\)]*?\))|(\{[^\{\}]*?\})',
-        # Remove all initializers.
-        r'=[^,]*',
-        # Remove :: and everything before it.
-        r'[^,]*::',
-        # Remove modifiers like &, *.
-        r'[&*]',
-        # Remove const modifiers.
-        r'\bconst\s+(?=[A-Za-z])',
-        # Remove numerical modifiers like long.
-        r'\b(unsigned|long|short)\s+(?=unsigned|long|short|int|char|double|float)')
-
-    skeleton_parameters = all_parameters
-    for simplification in all_simplifications:
-        skeleton_parameters = iteratively_replace_matches_with_char(simplification, ' ', skeleton_parameters)
-    # If there are any parameters, then add a , after the last one to
-    # make a regular pattern of a , following every parameter.
-    if skeleton_parameters.strip():
-        skeleton_parameters += ','
-    return skeleton_parameters
-
-
-def find_parameter_name_index(skeleton_parameter):
-    """Determines where the parametere name starts given the skeleton parameter."""
-    # The first space from the right in the simplified parameter is where the parameter
-    # name starts unless the first space is before any content in the simplified parameter.
-    before_name_index = skeleton_parameter.rstrip().rfind(' ')
-    if before_name_index != -1 and skeleton_parameter[:before_name_index].strip():
-        return before_name_index + 1
-    return len(skeleton_parameter)
-
-
-def parameter_list(elided_lines, start_position, end_position):
-    """Generator for a function's parameters."""
-    # Create new positions that omit the outer parenthesis of the parameters.
-    start_position = Position(row=start_position.row, column=start_position.column + 1)
-    end_position = Position(row=end_position.row, column=end_position.column - 1)
-    single_line_view = SingleLineView(elided_lines, start_position, end_position)
-    skeleton_parameters = create_skeleton_parameters(single_line_view.single_line)
-    end_index = -1
-
-    while True:
-        # Find the end of the next parameter.
-        start_index = end_index + 1
-        end_index = skeleton_parameters.find(',', start_index)
-
-        # No comma means that all parameters have been parsed.
-        if end_index == -1:
-            return
-        row = single_line_view.convert_column_to_row(end_index)
-
-        # Parse the parameter into a type and parameter name.
-        skeleton_parameter = skeleton_parameters[start_index:end_index]
-        name_offset = find_parameter_name_index(skeleton_parameter)
-        parameter = single_line_view.single_line[start_index:end_index]
-        yield Parameter(parameter, name_offset, row)
 
 
 class _FunctionState(object):
@@ -502,58 +316,27 @@ class _FunctionState(object):
         self.current_function = ''
         self.in_a_function = False
         self.lines_in_function = 0
-        # Make sure these will not be mistaken for real positions (even when a
+        # Make sure these will not be mistaken for real lines (even when a
         # small amount is added to them).
-        self.body_start_position = Position(-1000, 0)
-        self.end_position = Position(-1000, 0)
+        self.body_start_line_number = -1000
+        self.ending_line_number = -1000
 
-    def begin(self, function_name, function_name_start_position, body_start_position, end_position,
-              parameter_start_position, parameter_end_position, clean_lines):
+    def begin(self, function_name, body_start_line_number, ending_line_number):
         """Start analyzing function body.
 
         Args:
             function_name: The name of the function being tracked.
-            function_name_start_position: Position in elided where the function name starts.
-            body_start_position: Position in elided of the { or the ; for a prototype.
-            end_position: Position in elided just after the final } (or ; is.
-            parameter_start_position: Position in elided of the '(' for the parameters.
-            parameter_end_position: Position in elided just after the ')' for the parameters.
-            clean_lines: A CleansedLines instance containing the file.
+            ending_line_number: The line number where the function ends.
         """
         self.in_a_function = True
-        self.lines_in_function = -1  # Don't count the open brace line.
+        self.lines_in_function = 0
         self.current_function = function_name
-        self.function_name_start_position = function_name_start_position
-        self.body_start_position = body_start_position
-        self.end_position = end_position
-        self.is_declaration = clean_lines.elided[body_start_position.row][body_start_position.column] == ';'
-        self.parameter_start_position = parameter_start_position
-        self.parameter_end_position = parameter_end_position
-        self.is_pure = False
-        if self.is_declaration:
-            characters_after_parameters = SingleLineView(clean_lines.elided, parameter_end_position, body_start_position).single_line
-            self.is_pure = bool(match(r'\s*=\s*0\s*', characters_after_parameters))
-        self._clean_lines = clean_lines
-        self._parameter_list = None
-
-    def modifiers_and_return_type(self):
-         """Returns the modifiers and the return type."""
-         # Go backwards from where the function name is until we encounter one of several things:
-         #   ';' or '{' or '}' or 'private:', etc. or '#' or return Position(0, 0)
-         elided = self._clean_lines.elided
-         start_modifiers = _rfind_in_lines(r';|\{|\}|((private|public|protected):)|(#.*)', elided, self.parameter_start_position, Position(0, 0))
-         return SingleLineView(elided, start_modifiers, self.function_name_start_position).single_line.strip()
-
-    def parameter_list(self):
-        if not self._parameter_list:
-            # Store the final result as a tuple since that is immutable.
-            self._parameter_list = tuple(parameter_list(self._clean_lines.elided, self.parameter_start_position, self.parameter_end_position))
-
-        return self._parameter_list
+        self.body_start_line_number = body_start_line_number
+        self.ending_line_number = ending_line_number
 
     def count(self, line_number):
         """Count line in current function body."""
-        if self.in_a_function and line_number >= self.body_start_position.row:
+        if self.in_a_function and line_number >= self.body_start_line_number:
             self.lines_in_function += 1
 
     def check(self, error, line_number):
@@ -588,6 +371,16 @@ class _FunctionState(object):
 class _IncludeError(Exception):
     """Indicates a problem with the include order in a file."""
     pass
+
+
+def is_c_or_objective_c(file_extension):
+   """Return whether the file extension corresponds to C or Objective-C.
+
+   Args:
+     file_extension: The file extension without the leading dot.
+
+   """
+   return file_extension in ['c', 'm']
 
 
 class FileInfo:
@@ -632,16 +425,13 @@ class FileInfo:
                 prefix = os.path.commonprefix([root_dir, project_dir])
                 return fullname[len(prefix) + 1:]
 
-
-            # Not SVN <= 1.6? Try to find a git, or svn top level directory by
+            # Not SVN? Try to find a git top level directory by
             # searching up from the current path.
             root_dir = os.path.dirname(fullname)
             while (root_dir != os.path.dirname(root_dir)
-                   and not os.path.exists(os.path.join(root_dir, ".git"))
-                   and not os.path.exists(os.path.join(root_dir, ".svn"))):
+                   and not os.path.exists(os.path.join(root_dir, ".git"))):
                 root_dir = os.path.dirname(root_dir)
-                if (os.path.exists(os.path.join(root_dir, ".git")) or
-                   os.path.exists(os.path.join(root_dir, ".svn"))):
+                if os.path.exists(os.path.join(root_dir, ".git")):
                     prefix = os.path.commonprefix([root_dir, project_dir])
                     return fullname[len(prefix) + 1:]
 
@@ -685,7 +475,7 @@ _RE_PATTERN_CLEANSE_LINE_ESCAPES = re.compile(
 # Matches strings.  Escape codes should already be removed by ESCAPES.
 _RE_PATTERN_CLEANSE_LINE_DOUBLE_QUOTES = re.compile(r'"[^"]*"')
 # Matches characters.  Escape codes should already be removed by ESCAPES.
-_RE_PATTERN_CLEANSE_LINE_SINGLE_QUOTES = re.compile(r"'[^']{1,4}'")
+_RE_PATTERN_CLEANSE_LINE_SINGLE_QUOTES = re.compile(r"'.'")
 # Matches multi-line C++ comments.
 # This RE is a little bit more complicated than one might expect, because we
 # have to take care of space removals tools so we can handle comments inside
@@ -823,58 +613,49 @@ class CleansedLines(object):
         return elided
 
 
-def close_expression(elided, position):
+def close_expression(clean_lines, line_number, pos):
     """If input points to ( or { or [, finds the position that closes it.
 
-    If elided[position.row][position.column] points to a '(' or '{' or '[',
-    finds the line_number/pos that correspond to the closing of the expression.
+    If clean_lines.elided[line_number][pos] points to a '(' or '{' or '[', finds
+    the line_number/pos that correspond to the closing of the expression.
 
-     Args:
-       elided: A CleansedLines.elided instance containing the file.
-       position: The position of the opening item.
+    Args:
+      clean_lines: A CleansedLines instance containing the file.
+      line_number: The number of the line to check.
+      pos: A position on the line.
 
-     Returns:
-      The Position *past* the closing brace, or Position(len(elided), -1)
-      if we never find a close. Note we ignore strings and comments when matching.
+    Returns:
+      A tuple (line, line_number, pos) pointer *past* the closing brace, or
+      ('', len(clean_lines.elided), -1) if we never find a close.  Note we
+      ignore strings and comments when matching; and the line we return is the
+      'cleansed' line at line_number.
     """
-    line = elided[position.row]
-    start_character = line[position.column]
+
+    line = clean_lines.elided[line_number]
+    start_character = line[pos]
+    if start_character not in '({[':
+        return (line, clean_lines.num_lines(), -1)
     if start_character == '(':
-        enclosing_character_regex = r'[\(\)]'
-    elif start_character == '[':
-        enclosing_character_regex = r'[\[\]]'
-    elif start_character == '{':
-        enclosing_character_regex = r'[\{\}]'
-    else:
-        return Position(len(elided), -1)
+        end_character = ')'
+    if start_character == '[':
+        end_character = ']'
+    if start_character == '{':
+        end_character = '}'
 
-    current_column = position.column + 1
-    line_number = position.row
-    net_open = 1
-    for line in elided[position.row:]:
-        line = line[current_column:]
-
-        # Search the current line for opening and closing characters.
-        while True:
-            next_enclosing_character = search(enclosing_character_regex, line)
-            # No more on this line.
-            if not next_enclosing_character:
-                break
-            current_column += next_enclosing_character.end(0)
-            line = line[next_enclosing_character.end(0):]
-            if next_enclosing_character.group(0) == start_character:
-                net_open += 1
-            else:
-                net_open -= 1
-                if not net_open:
-                    return Position(line_number, current_column)
-
-        # Proceed to the next line.
+    num_open = line.count(start_character) - line.count(end_character)
+    while num_open > 0:
         line_number += 1
-        current_column = 0
+        if line_number >= clean_lines.num_lines():
+            return ('', len(clean_lines.elided), -1)
+        line = clean_lines.elided[line_number]
+        num_open += line.count(start_character) - line.count(end_character)
+    # OK, now find the end_character that actually got us back to even
+    endpos = len(line)
+    while num_open >= 0:
+        endpos = line.rfind(')', 0, endpos)
+        num_open -= 1                 # chopped off another )
+    return (line, line_number, endpos + 1)
 
-    # The given item was not closed.
-    return Position(len(elided), -1)
 
 def check_for_copyright(lines, error):
     """Logs an error if no Copyright message appears at the top of the file."""
@@ -906,14 +687,7 @@ def get_header_guard_cpp_variable(filename):
     # flymake.
     filename = re.sub(r'_flymake\.h$', '.h', filename)
 
-    standard_name = sub(r'[-.\s]', '_', os.path.basename(filename))
-
-    # Files under WTF typically have header guards that start with WTF_.
-    if '/wtf/' in filename:
-        special_name = "WTF_" + standard_name
-    else:
-        special_name = standard_name
-    return (special_name, standard_name)
+    return sub(r'[-.\s]', '_', os.path.basename(filename))
 
 
 def check_for_header_guard(filename, lines, error):
@@ -949,13 +723,13 @@ def check_for_header_guard(filename, lines, error):
     if not ifndef or not define or ifndef != define:
         error(0, 'build/header_guard', 5,
               'No #ifndef header guard found, suggested CPP variable is: %s' %
-              cppvar[0])
+              cppvar)
         return
 
     # The guard should be File_h.
-    if ifndef not in cppvar:
+    if ifndef != cppvar:
         error(ifndef_line_number, 'build/header_guard', 5,
-              '#ifndef header guard has wrong style, please use: %s' % cppvar[0])
+              '#ifndef header guard has wrong style, please use: %s' % cppvar)
 
 
 def check_for_unicode_replacement_characters(lines, error):
@@ -976,8 +750,8 @@ def check_for_unicode_replacement_characters(lines, error):
                   'Line contains invalid UTF-8 (or Unicode replacement character).')
 
 
-def check_for_missing_new_line_at_eof(lines, error):
-    """Logs an error if there is not a newline character at the end of the file.
+def check_for_new_line_at_eof(lines, error):
+    """Logs an error if there is no newline char at the end of the file.
 
     Args:
       lines: An array of strings, each representing a line of the file.
@@ -991,25 +765,6 @@ def check_for_missing_new_line_at_eof(lines, error):
     if len(lines) < 3 or lines[-2]:
         error(len(lines) - 2, 'whitespace/ending_newline', 5,
               'Could not find a newline character at the end of the file.')
-
-
-def check_for_extra_new_line_at_eof(lines, error):
-    """Logs an error if there is not a single newline at the end of the file.
-
-    Args:
-      lines: An array of strings, each representing a line of the file.
-      error: The function to call with any errors found.
-    """
-    # The array lines() was created by adding two newlines to the
-    # original file (go figure), then splitting on \n.
-    # len(lines) < 3 means that the original file contain one or less lines,
-    # so there is no way to be 'more then one newline at the end'.
-    # The case when the -2. line is non-empty should addressed in the
-    # check_for_missing_new_line_at_eof so it can be ignored here.
-    if len(lines) > 3:
-        if not lines[-2] and not lines[-3]:
-            error(len(lines) - 2, 'whitespace/ending_newline', 5,
-                  'There was more than one newline at the end of the file.')
 
 
 def check_for_multiline_comments_and_strings(clean_lines, line_number, error):
@@ -1083,7 +838,7 @@ def check_posix_threading(clean_lines, line_number, error):
     line = clean_lines.elided[line_number]
     for single_thread_function, multithread_safe_function in _THREADING_LIST:
         index = line.find(single_thread_function)
-        # Comparisons made explicit for clarity
+        # Comparisons made explicit for clarity -- pylint: disable-msg=C6403
         if index >= 0 and (index == 0 or (not line[index - 1].isalnum()
                                           and line[index - 1] not in ('_', '.', '>'))):
             error(line_number, 'runtime/threadsafe_fn', 2,
@@ -1161,115 +916,14 @@ class _ClassState(object):
 
 
 class _FileState(object):
-    def __init__(self, clean_lines, file_extension):
+    def __init__(self):
         self._did_inside_namespace_indent_warning = False
-        self._clean_lines = clean_lines
-        if file_extension == 'm':
-            self._is_objective_cpp = False
-            self._is_objective_c = True
-            self._is_c = False
-        elif file_extension == 'mm':
-            self._is_objective_cpp = True
-            self._is_objective_c = False
-            self._is_c = False
-        elif file_extension == 'h':
-            # In the case of header files, it is unknown if the file
-            # is C / Objective-C / Objective-C++ or not, so set this value to None and then
-            # if it is requested, use heuristics to guess the value.
-            self._is_objective_cpp = None
-            self._is_objective_c = None
-            self._is_c = None
-        elif file_extension == 'c':
-            self._is_objective_cpp = False
-            self._is_c = True
-            self._is_objective_c = False
-        else:
-            self._is_objective_cpp = False
-            self._is_objective_c = False
-            self._is_c = False
 
     def set_did_inside_namespace_indent_warning(self):
         self._did_inside_namespace_indent_warning = True
 
     def did_inside_namespace_indent_warning(self):
         return self._did_inside_namespace_indent_warning
-
-    def is_objective_c(self):
-        if self._is_objective_c is None:
-            for line in self._clean_lines.elided:
-                # Starting with @ or #import seem like the best indications
-                # that we have an Objective C file.
-                if line.startswith("@") or line.startswith("#import"):
-                    self._is_objective_c = True
-                    break
-            else:
-                self._is_objective_c = False
-        return self._is_objective_c
-
-    def is_objective_c_or_objective_cpp(self):
-        return self._is_objective_cpp or self.is_objective_c()
-
-    def is_c(self):
-        if self._is_c is None:
-            for line in self._clean_lines.lines:
-                # if extern "C" is found, then it is a good indication
-                # that we have a C header file.
-                if line.startswith('extern "C"'):
-                    self._is_c = True
-                    break
-            else:
-                self._is_c = False
-        return self._is_c
-
-    def is_c_or_objective_c(self):
-        """Return whether the file extension corresponds to C or Objective-C."""
-        return self.is_c() or self.is_objective_c()
-
-
-class _EnumState(object):
-    """Maintains whether currently in an enum declaration, and checks whether
-    enum declarations follow the style guide.
-    """
-
-    def __init__(self):
-        self.in_enum_decl = False
-        self.is_webidl_enum = False
-
-    def process_clean_line(self, line):
-        # FIXME: The regular expressions for expr_all_uppercase and expr_enum_end only accept integers
-        # and identifiers for the value of the enumerator, but do not accept any other constant
-        # expressions. However, this is sufficient for now (11/27/2012).
-        expr_all_uppercase = r'\s*[A-Z0-9_]+\s*(?:=\s*[a-zA-Z0-9]+\s*)?,?\s*$'
-        expr_starts_lowercase = r'\s*[a-jl-z]'
-        expr_enum_end = r'}\s*(?:[a-zA-Z0-9]+\s*(?:=\s*[a-zA-Z0-9]+)?)?\s*;\s*'
-        expr_enum_start = r'\s*(?:enum(?:\s+class)?(?:\s+[a-zA-Z0-9]+)?)\s*\{?\s*'
-        if self.in_enum_decl:
-            if match(r'\s*' + expr_enum_end + r'$', line):
-                self.in_enum_decl = False
-                self.is_webidl_enum = False
-                return True
-            elif match(expr_all_uppercase, line):
-                return self.is_webidl_enum
-            elif match(expr_starts_lowercase, line):
-                return False
-        matched = match(expr_enum_start + r'$', line)
-        if matched:
-            self.in_enum_decl = True
-        else:
-            matched = match(expr_enum_start + r'(?P<members>.*)' + expr_enum_end + r'$', line)
-            if matched:
-                members = matched.group('members').split(',')
-                found_invalid_member = False
-                for member in members:
-                    if match(expr_all_uppercase, member):
-                        found_invalid_member = not self.is_webidl_enum
-                    if match(expr_starts_lowercase, member):
-                        found_invalid_member = True
-                    if found_invalid_member:
-                        self.is_webidl_enum = False
-                        return False
-                return True
-        return True
 
 def check_for_non_standard_constructs(clean_lines, line_number,
                                       class_state, error):
@@ -1430,13 +1084,14 @@ def check_spacing_for_function_call(line, line_number, error):
       error: The function to call with any errors found.
     """
 
-    # Since function calls often occur inside if/for/while/switch
+    # Since function calls often occur inside if/for/foreach/while/switch
     # expressions - which have their own, more liberal conventions - we
     # first see if we should be looking inside such an expression for a
     # function call, to which we can apply more strict standards.
     function_call = line    # if there's no control flow construct, look at whole line
     for pattern in (r'\bif\s*\((.*)\)\s*{',
                     r'\bfor\s*\((.*)\)\s*{',
+                    r'\bforeach\s*\((.*)\)\s*{',
                     r'\bwhile\s*\((.*)\)\s*[{;]',
                     r'\bswitch\s*\((.*)\)\s*{'):
         matched = search(pattern, line)
@@ -1444,7 +1099,7 @@ def check_spacing_for_function_call(line, line_number, error):
             function_call = matched.group(1)    # look inside the parens for function calls
             break
 
-    # Except in if/for/while/switch, there should never be space
+    # Except in if/for/foreach/while/switch, there should never be space
     # immediately inside parens (eg "f( 3, 4 )").  We make an exception
     # for nested parens ( (a+b) + c ).  Likewise, there should never be
     # a space before a ( when it's a function argument.  I assume it's a
@@ -1458,7 +1113,7 @@ def check_spacing_for_function_call(line, line_number, error):
     # Note that we assume the contents of [] to be short enough that
     # they'll never need to wrap.
     if (  # Ignore control structures.
-        not search(r'\b(if|for|while|switch|return|new|delete)\b', function_call)
+        not search(r'\b(if|for|foreach|while|switch|return|new|delete)\b', function_call)
         # Ignore pointers/references to functions.
         and not search(r' \([^)]+\)\([^)]*(\)|,$)', function_call)
         # Ignore pointers/references to arrays.
@@ -1470,7 +1125,7 @@ def check_spacing_for_function_call(line, line_number, error):
             error(line_number, 'whitespace/parens', 2,
                   'Extra space after (')
         if (search(r'\w\s+\(', function_call)
-            and not match(r'\s*(#|typedef|@property|@interface|@implementation)', function_call)):
+            and not search(r'#\s*define|typedef', function_call)):
             error(line_number, 'whitespace/parens', 4,
                   'Extra space before ( in function call')
         # If the ) is followed only by a newline or a { + newline, assume it's
@@ -1510,7 +1165,7 @@ def detect_functions(clean_lines, line_number, function_state, error):
       error: The function to call with any errors found.
     """
     # Are we now past the end of a function?
-    if function_state.end_position.row + 1 == line_number:
+    if function_state.ending_line_number + 1 == line_number:
         function_state.end()
 
     # If we're in a function, don't try to detect a new one.
@@ -1522,11 +1177,7 @@ def detect_functions(clean_lines, line_number, function_state, error):
     raw = clean_lines.raw_lines
     raw_line = raw[line_number]
 
-    # Lines ending with a \ indicate a macro. Don't try to check them.
-    if raw_line.endswith('\\'):
-        return
-
-    regexp = r'\s*(\w(\w|::|\*|\&|\s|<|>|,|~|(operator\s*(/|-|=|!|\+)+))*)\('  # decls * & space::name( ...
+    regexp = r'\s*(\w(\w|::|\*|\&|\s|<|>|,|~)*)\('  # decls * & space::name( ...
     match_result = match(regexp, line)
     if not match_result:
         return
@@ -1539,23 +1190,22 @@ def detect_functions(clean_lines, line_number, function_state, error):
 
     joined_line = ''
     for start_line_number in xrange(line_number, clean_lines.num_lines()):
-        start_line = clean_lines.elided[start_line_number]
+        start_line = lines[start_line_number]
         joined_line += ' ' + start_line.lstrip()
-        body_match = search(r'{|;', start_line)
-        if body_match:
-            body_start_position = Position(start_line_number, body_match.start(0))
+        if search(r'(;|})', start_line):  # Declarations and trivial functions
+            return                              # ... ignore
 
+        if search(r'{', start_line):
             # Replace template constructs with _ so that no spaces remain in the function name,
             # while keeping the column numbers of other characters the same as "line".
             line_with_no_templates = iteratively_replace_matches_with_char(r'<[^<>]*>', '_', line)
-            match_function = search(r'((\w|:|<|>|,|~|(operator\s*(/|-|=|!|\+)+))*)\(', line_with_no_templates)
+            match_function = search(r'((\w|:|<|>|,|~)*)\(', line_with_no_templates)
             if not match_function:
                 return  # The '(' must have been inside of a template.
 
             # Use the column numbers from the modified line to find the
             # function name in the original line.
             function = line[match_function.start(1):match_function.end(1)]
-            function_name_start_position = Position(line_number, match_function.start(1))
 
             if match(r'TEST', function):    # Handle TEST... macros
                 parameter_regexp = search(r'(\(.*\))', joined_line)
@@ -1563,24 +1213,9 @@ def detect_functions(clean_lines, line_number, function_state, error):
                     function += parameter_regexp.group(1)
             else:
                 function += '()'
-
-            parameter_start_position = Position(line_number, match_function.end(1))
-            parameter_end_position = close_expression(clean_lines.elided, parameter_start_position)
-            if parameter_end_position.row == len(clean_lines.elided):
-                # No end was found.
-                return
-
-            if start_line[body_start_position.column] == ';':
-                end_position = Position(body_start_position.row, body_start_position.column + 1)
-            else:
-                end_position = close_expression(clean_lines.elided, body_start_position)
-
-            # Check for nonsensical positions. (This happens in test cases which check code snippets.)
-            if parameter_end_position > body_start_position:
-                return
-
-            function_state.begin(function, function_name_start_position, body_start_position, end_position,
-                                 parameter_start_position, parameter_end_position, clean_lines)
+            open_brace_index = start_line.find('{')
+            ending_line_number = close_expression(clean_lines, start_line_number, open_brace_index)[1]
+            function_state.begin(function, start_line_number + 1, ending_line_number)
             return
 
     # No body for the function (or evidence of a non-function) was found.
@@ -1609,95 +1244,37 @@ def check_for_function_lengths(clean_lines, line_number, function_state, error):
     raw = clean_lines.raw_lines
     raw_line = raw[line_number]
 
-    if function_state.end_position.row == line_number:  # last line
+    if function_state.ending_line_number == line_number:  # last line
         if not search(r'\bNOLINT\b', raw_line):
             function_state.check(error, line_number)
     elif not match(r'^\s*$', line):
         function_state.count(line_number)  # Count non-blank/non-comment lines.
 
 
-def _check_parameter_name_against_text(parameter, text, error):
-    """Checks to see if the parameter name is contained within the text.
+def check_pass_ptr_usage(clean_lines, line_number, function_state, error):
+    """Check for proper usage of Pass*Ptr.
 
-    Return false if the check failed (i.e. an error was produced).
-    """
+    Currently this is limited to detecting declarations of Pass*Ptr
+    variables inside of functions.
 
-    # Treat 'lower with underscores' as a canonical form because it is
-    # case insensitive while still retaining word breaks. (This ensures that
-    # 'elate' doesn't look like it is duplicating of 'NateLate'.)
-    canonical_parameter_name = parameter.lower_with_underscores_name()
-
-    # Appends "object" to all text to catch variables that did the same (but only
-    # do this when the parameter name is more than a single character to avoid
-    # flagging 'b' which may be an ok variable when used in an rgba function).
-    if len(canonical_parameter_name) > 1:
-        text = sub(r'(\w)\b', r'\1Object', text)
-    canonical_text = _convert_to_lower_with_underscores(text)
-
-    # Used to detect cases like ec for ExceptionCode.
-    acronym = _create_acronym(text).lower()
-    if canonical_text.find(canonical_parameter_name) != -1 or acronym.find(canonical_parameter_name) != -1:
-        error(parameter.row, 'readability/parameter_name', 5,
-              'The parameter name "%s" adds no information, so it should be removed.' % parameter.name)
-        return False
-    return True
-
-def check_function_definition(filename, file_extension, clean_lines, line_number, function_state, error):
-    """Check that function definitions for style issues.
-
-    Specifically, check that parameter names in declarations add information.
-
-    Args:
-       filename: Filename of the file that is being processed.
-       file_extension: The current file extension, without the leading dot.
-       clean_lines: A CleansedLines instance containing the file.
-       line_number: The number of the line to check.
-       function_state: Current function name and lines in body so far.
-       error: The function to call with any errors found.
-    """
-    if line_number != function_state.body_start_position.row:
-        return
-
-    parameter_list = function_state.parameter_list()
-    for parameter in parameter_list:
-        # Do checks specific to function declarations and parameter names.
-        if not function_state.is_declaration or not parameter.name:
-            continue
-
-        # Check the parameter name against the function name for single parameter set functions.
-        if len(parameter_list) == 1 and match('set[A-Z]', function_state.current_function):
-            trimmed_function_name = function_state.current_function[len('set'):]
-            if not _check_parameter_name_against_text(parameter, trimmed_function_name, error):
-                continue  # Since an error was noted for this name, move to the next parameter.
-
-        # Check the parameter name against the type.
-        if not _check_parameter_name_against_text(parameter, parameter.type, error):
-            continue  # Since an error was noted for this name, move to the next parameter.
-
-
-def check_for_leaky_patterns(clean_lines, line_number, function_state, error):
-    """Check for constructs known to be leak prone.
     Args:
       clean_lines: A CleansedLines instance containing the file.
       line_number: The number of the line to check.
       function_state: Current function name and lines in body so far.
       error: The function to call with any errors found.
     """
+    if not function_state.in_a_function:
+        return
+
     lines = clean_lines.lines
     line = lines[line_number]
-
-    matched_get_dc = search(r'\b(?P<function_name>GetDC(Ex)?)\s*\(', line)
-    if matched_get_dc:
-        error(line_number, 'runtime/leaky_pattern', 5,
-              'Use the class HWndDC instead of calling %s to avoid potential '
-              'memory leaks.' % matched_get_dc.group('function_name'))
-
-    matched_create_dc = search(r'\b(?P<function_name>Create(Compatible)?DC)\s*\(', line)
-    matched_own_dc = search(r'\badoptGDIObject\b', line)
-    if matched_create_dc and not matched_own_dc:
-        error(line_number, 'runtime/leaky_pattern', 5,
-              'Use adoptGDIObject and GDIObject<HDC> when calling %s to avoid potential '
-              'memory leaks.' % matched_create_dc.group('function_name'))
+    if line_number >= function_state.body_start_line_number:
+        matched_pass_ptr = match(r'^\s*Pass([A-Z][A-Za-z]*)Ptr<', line)
+        if matched_pass_ptr:
+            type_name = 'Pass%sPtr' % matched_pass_ptr.group(1)
+            error(line_number, 'readability/pass_ptr', 5,
+                  'Local variables should never be %s (see '
+                  'http://webkit.org/coding/RefPtr.html).' % type_name)
 
 
 def check_spacing(file_extension, clean_lines, line_number, error):
@@ -1785,11 +1362,11 @@ def check_spacing(file_extension, clean_lines, line_number, error):
                 error(line_number, 'whitespace/blank_line', 3,
                       'Blank line at the end of a code block.  Is this needed?')
 
-    # Next, we check for proper spacing with respect to comments.
+    # Next, we complain if there's a comment too near the text
     comment_position = line.find('//')
     if comment_position != -1:
         # Check if the // may be in quotes.  If so, ignore it
-        # Comparisons made explicit for clarity
+        # Comparisons made explicit for clarity -- pylint: disable-msg=C6403
         if (line.count('"', 0, comment_position) - line.count('\\"', 0, comment_position)) % 2 == 0:   # not in quotes
             # Allow one space before end of line comment.
             if (not match(r'^\s*$', line[:comment_position])
@@ -1813,50 +1390,25 @@ def check_spacing(file_extension, clean_lines, line_number, error):
                     error(line_number, 'whitespace/comments', 4,
                           'Should have a space between // and comment')
 
-            # There should only be one space after punctuation in a comment.
-            if search(r'[.!?,;:]\s\s+\w', line[comment_position:]):
-                error(line_number, 'whitespace/comments', 5,
-                      'Should have only a single space after a punctuation in a comment.')
-
     line = clean_lines.elided[line_number]  # get rid of comments and strings
 
-    # Objective-C @property lines.
-    is_objective_c_property = search(r'^@property', line)
-    if is_objective_c_property:
-        # "@property (attr)" not "@property(attr)"
-        if search(r'^@property\(', line):
-            error(line_number, 'whitespace/property', 4,
-                  'Should have space between @property and attributes.')
-        # "(getter=foo)" not "(getter = foo)"
-        if search(r'(\s+=|=\s+)', line):
-            error(line_number, 'whitespace/property', 4,
-                  'Should not have spaces around = in property attributes.')
-
-    # Objective-C @synthesize lines.
-    is_objective_c_synthesize = search(r'^@synthesize', line)
-    if is_objective_c_synthesize:
-        # "prop=_varName" not "prop = _varName"
-        if search(r'(\s+=|=\s+)', line):
-            error(line_number, 'whitespace/property', 4,
-                  'Should not have spaces around = in property synthesis.')
-
     # Don't try to do spacing checks for operator methods
-    line = sub(r'operator(==|!=|<|<<|<=|>=|>>|>|\+=|-=|\*=|/=|%=|&=|\|=|^=|<<=|>>=|/)\(', 'operator\(', line)
-    # Don't try to do spacing checks for #include, #import, or #if statements at
+    line = sub(r'operator(==|!=|<|<<|<=|>=|>>|>|\+=|-=|\*=|/=|%=|&=|\|=|^=|<<=|>>=)\(', 'operator\(', line)
+    # Don't try to do spacing checks for #include or #import statements at
     # minimum because it messes up checks for spacing around /
-    if match(r'\s*#\s*(?:include|import|if)', line):
+    if match(r'\s*#\s*(?:include|import)', line):
         return
-    if not is_objective_c_property and not is_objective_c_synthesize and search(r'[\w.]=[\w.]', line):
+    if search(r'[\w.]=[\w.]', line):
         error(line_number, 'whitespace/operators', 4,
               'Missing spaces around =')
 
     # FIXME: It's not ok to have spaces around binary operators like .
 
     # You should always have whitespace around binary operators.
-    # Alas, we can't test <, >, <<, >>, or && because they're legitimately used sans spaces
-    # (a->b, vector<int> a, Foo&& a).  The only time we can tell is a < with no >, and
+    # Alas, we can't test < or > because they're legitimately used sans spaces
+    # (a->b, vector<int> a).  The only time we can tell is a < with no >, and
     # only if it's not template params list spilling into the next line.
-    matched = search(r'[^<>=!\s](==|!=|\+=|-=|\*=|/=|/|\|=|&=|<<=|>>=|<=|>=|\|\||\|)[^<>=!\s]', line)
+    matched = search(r'[^<>=!\s](==|!=|\+=|-=|\*=|/=|/|\|=|&=|<<=|>>=|<=|>=|\|\||\||&&|>>|<<)[^<>=!\s]', line)
     if not matched:
         # Note that while it seems that the '<[^<]*' term in the following
         # regexp could be simplified to '<.*', which would indeed match
@@ -1864,9 +1416,7 @@ def check_spacing(file_extension, clean_lines, line_number, error):
         # regexp takes linear rather than quadratic time.
         if not search(r'<[^<]*,\s*$', line):  # template params spill
             matched = search(r'[^<>=!\s](<)[^<>=!\s]([^>]|->)*$', line)
-    # It is necessary to check this, because rvaule references can be in
-    # parameter packs (c++11 feature)
-    if matched and not search(r'&&\.\.\.', line):
+    if matched:
         error(line_number, 'whitespace/operators', 3,
               'Missing spaces around %s' % matched.group(1))
 
@@ -1877,23 +1427,21 @@ def check_spacing(file_extension, clean_lines, line_number, error):
               'Extra space for operator %s' % matched.group(1))
 
     # A pet peeve of mine: no spaces after an if, while, switch, or for
-    matched = search(r' (if\(|for\(|while\(|switch\()', line)
+    matched = search(r' (if\(|for\(|foreach\(|while\(|switch\()', line)
     if matched:
         error(line_number, 'whitespace/parens', 5,
               'Missing space before ( in %s' % matched.group(1))
 
-    # For if/for/while/switch, the left and right parens should be
+    # For if/for/foreach/while/switch, the left and right parens should be
     # consistent about how many spaces are inside the parens, and
     # there should either be zero or one spaces inside the parens.
     # We don't want: "if ( foo)" or "if ( foo   )".
     # Exception: "for ( ; foo; bar)" and "for (foo; bar; )" are allowed.
-    matched = search(r'\b(?P<statement>if|for|while|switch)\s*\((?P<remainder>.*)$', line)
+    matched = search(r'\b(?P<statement>if|for|foreach|while|switch)\s*\((?P<remainder>.*)$', line)
     if matched:
         statement = matched.group('statement')
         condition, rest = up_to_unmatched_closing_paren(matched.group('remainder'))
         if condition is not None:
-            if statement == 'for' and search(r'(?:[^ :]:[^:]|[^:]:[^ :])', condition):
-                error(line_number, 'whitespace/colon', 4, 'Missing space around : in range-based for statement')
             condition_match = search(r'(?P<leading>[ ]*)(?P<separator>.).*[^ ]+(?P<trailing>[ ]*)', condition)
             if condition_match:
                 n_leading = len(condition_match.group('leading'))
@@ -1910,8 +1458,8 @@ def check_spacing(file_extension, clean_lines, line_number, error):
                               'Extra space before ) in %s' % statement)
 
             # Do not check for more than one command in macros
-            in_preprocessor_directive = match(r'\s*#', line)
-            if not in_preprocessor_directive and not match(r'((\s*{\s*}?)|(\s*;?))\s*\\?$', rest):
+            in_macro = match(r'\s*#define', line)
+            if not in_macro and not match(r'((\s*{\s*}?)|(\s*;?))\s*\\?$', rest):
                 error(line_number, 'whitespace/parens', 4,
                       'More than one command on the same line in %s' % statement)
 
@@ -1927,8 +1475,8 @@ def check_spacing(file_extension, clean_lines, line_number, error):
 
     if file_extension == 'cpp':
         # C++ should have the & or * beside the type not the variable name.
-        matched = match(r'\s*(?P<pre_part>\w[\w\s]+)\s+(?P<pointer_operator>\*|\&)\s*\w+', line)
-        if matched and not matched.group('pre_part').startswith('return') and not matched.group('pre_part').startswith('delete'):
+        matched = match(r'\s*\w+(?<!\breturn|\bdelete)\s+(?P<pointer_operator>\*|\&)\w+', line)
+        if matched:
             error(line_number, 'whitespace/declaration', 3,
                   'Declaration has space between type name and %s in %s' % (matched.group('pointer_operator'), matched.group(0).strip()))
 
@@ -1942,11 +1490,10 @@ def check_spacing(file_extension, clean_lines, line_number, error):
     # Next we will look for issues with function calls.
     check_spacing_for_function_call(line, line_number, error)
 
-    # Except after an opening paren, ^ for blocks, or @ for Objective-C
-    # literal NSDictionary, you should have spaces before your braces.
-    # Since you should never have braces at the beginning of a line, this
-    # is an easy test.
-    if search(r'[^ ({\^@]{', line):
+    # Except after an opening paren, you should have spaces before your braces.
+    # And since you should never have braces at the beginning of a line, this is
+    # an easy test.
+    if search(r'[^ ({]{', line):
         error(line_number, 'whitespace/braces', 5,
               'Missing space before {')
 
@@ -1956,18 +1503,10 @@ def check_spacing(file_extension, clean_lines, line_number, error):
               'Missing space before else')
 
     # You shouldn't have spaces before your brackets, except maybe after
-    # 'delete []' or 'new char * []'. Objective-C can't follow this rule
-    # because of method calls.
-    if file_extension != 'mm' and file_extension != 'm':
-        if search(r'\w\s+\[', line) and not search(r'(delete|return)\s+\[', line):
-            error(line_number, 'whitespace/brackets', 5,
-                  'Extra space before [.')
-
-    # There should always be a single space in between braces on the same line.
-    if search(r'\{\}', line):
-        error(line_number, 'whitespace/braces', 5, 'Missing space inside { }.')
-    if search(r'\{\s\s+\}', line):
-        error(line_number, 'whitespace/braces', 5, 'Too many spaces inside { }.')
+    # 'delete []' or 'new char * []'.
+    if search(r'\w\s+\[', line) and not search(r'delete\s+\[', line):
+        error(line_number, 'whitespace/braces', 5,
+              'Extra space before [')
 
     # You shouldn't have a space before a semicolon at the end of the line.
     # There's a special case for "for" since the style guide allows space before
@@ -1990,58 +1529,6 @@ def check_spacing(file_extension, clean_lines, line_number, error):
         error(line_number, 'whitespace/semicolon', 5,
               'Semicolon defining empty statement for this loop. Use { } instead.')
 
-
-def check_member_initialization_list(clean_lines, line_number, error):
-    """ Look for style errors in member initialization list of classes.
-
-    Args:
-      clean_lines: A CleansedLines instance containing the file.
-      line_number: The number of the line to check.
-      error: The function to call with any errors found.
-    """
-
-    raw = clean_lines.raw_lines
-    line = raw[line_number]
-
-    if search(r'\b([A-Za-z0-9_]*_)\(\1\)', line):
-        error(line_number, 'runtime/init', 4,
-              'You seem to be initializing a member variable with itself.')
-
-    # Check the style of the initializer list.
-    # Each member (and superclass) should be indented on a separate line,
-    # with the colon or comma preceding the member on that line.
-    begin_line = line
-    # match the start of initialization list
-    if search(r'^(?P<indentation>\s*)((explicit\s+)?[^(\s|\?)]+\([^\?]*\)\s?\:|^(\s|\?)*\:)([^\:]|\Z)[^;]*$', line):
-        if search(r'[^:]\:[^\:\s]+', line):
-            error(line_number, 'whitespace/init', 4,
-                'Missing spaces around :')
-        if (not line.lstrip().startswith(':')) and search(r'[^\s]\(.*\)\s?\:.*[^;]*$', line):
-            error(line_number, 'whitespace/indent', 4,
-                'Should be indented on a separate line, with the colon or comma first on that line.')
-        else:
-            begin_line, begin_line_number = get_previous_non_blank_line(clean_lines, line_number)
-
-        matched = search(r'(?P<indentation>\s*).*', begin_line)
-        indentation = matched.group('indentation')
-        inner_indentation = indentation + ' ' * 4
-
-        while(not search(r'{', line)):
-            # Don't check inheritance style and precompiler directives
-            if (not line.startswith('#')) and search(r'\S\(.*\)', line):
-                if not line.startswith(inner_indentation) and begin_line != line:
-                    error(line_number, 'whitespace/indent', 4,
-                        'Wrong number of spaces before statement. (expected: %d)' % len(inner_indentation))
-                if search(r'\S\s*,\s*$', line):
-                    error(line_number, 'whitespace/init', 4,
-                        'Comma should be at the beginning of the line in a member initialization list.')
-
-            # To avoid infinite loop, if can't find the end of member initialization list
-            if line_number < len(raw) - 1:
-                line_number = line_number + 1
-                line = raw[line_number]
-            else:
-                break
 
 def get_previous_non_blank_line(clean_lines, line_number):
     """Return the most recent non-blank line and its line number.
@@ -2111,85 +1598,21 @@ def check_namespace_indentation(clean_lines, line_number, file_extension, file_s
         else:
             looking_for_semicolon = False; # If we have a brace we may not need a semicolon.
         current_indentation_level += current_line.count('{') - current_line.count('}')
-        current_indentation_level += current_line.count('(') - current_line.count(')')
         if current_indentation_level < 0:
             break;
 
-
-def check_enum_casing(clean_lines, line_number, enum_state, error):
-    """Looks for incorrectly named enum values.
-
-    Args:
-      clean_lines: A CleansedLines instance containing the file.
-      line_number: The number of the line to check.
-      enum_state: A _EnumState instance which maintains enum declaration state.
-      error: The function to call with any errors found.
-    """
-
-    enum_state.is_webidl_enum |= bool(match(r'\s*// Web(?:Kit)?IDL enum\s*$', clean_lines.raw_lines[line_number]))
-
-    line = clean_lines.elided[line_number]  # Get rid of comments and strings.
-    if not enum_state.process_clean_line(line):
-        error(line_number, 'readability/enum_casing', 4,
-              'enum members should use InterCaps with an initial capital letter or initial \'k\' for C-style enums.')
-
-def check_directive_indentation(clean_lines, line_number, file_state, error):
-    """Looks for indentation of preprocessor directives.
-
-    Args:
-      clean_lines: A CleansedLines instance containing the file.
-      line_number: The number of the line to check.
-      file_state: A _FileState instance which maintains information about
-                  the state of things in the file.
-      error: The function to call with any errors found.
-    """
-
-    line = clean_lines.elided[line_number]  # Get rid of comments and strings.
-
-    indented_preprocessor_directives = match(r'\s+#', line)
-    if not indented_preprocessor_directives:
-        return
-
-    error(line_number, 'whitespace/indent', 4, 'preprocessor directives (e.g., #ifdef, #define, #import) should never be indented.')
-
-
-def get_initial_spaces_for_line(clean_line):
-    initial_spaces = 0
-    while initial_spaces < len(clean_line) and clean_line[initial_spaces] == ' ':
-        initial_spaces += 1
-    return initial_spaces
-
-def check_indentation_amount(clean_lines, line_number, error):
-    line = clean_lines.elided[line_number]
-    initial_spaces = get_initial_spaces_for_line(line)
-
-    if initial_spaces % 4:
-        error(line_number, 'whitespace/indent', 3,
-              'Weird number of spaces at line-start.  Are you using a 4-space indent?')
-        return
-
-    previous_line = get_previous_non_blank_line(clean_lines, line_number)[0]
-    if not previous_line.strip() or match(r'\s*\w+\s*:\s*$', previous_line) or previous_line[0] == '#':
-        return
-
-    previous_line_initial_spaces = get_initial_spaces_for_line(previous_line)
-    if initial_spaces > previous_line_initial_spaces + 4:
-        error(line_number, 'whitespace/indent', 3, 'When wrapping a line, only indent 4 spaces.')
-
-
-def check_using_std(clean_lines, line_number, file_state, error):
+def check_using_std(file_extension, clean_lines, line_number, error):
     """Looks for 'using std::foo;' statements which should be replaced with 'using namespace std;'.
 
     Args:
+      file_extension: The extension of the current file, without the leading dot.
       clean_lines: A CleansedLines instance containing the file.
       line_number: The number of the line to check.
-      file_state: A _FileState instance which maintains information about
-                  the state of things in the file.
       error: The function to call with any errors found.
     """
 
     # This check doesn't apply to C or Objective-C implementation files.
-    if file_state.is_c_or_objective_c():
+    if is_c_or_objective_c(file_extension):
         return
 
     line = clean_lines.elided[line_number] # Get rid of comments and strings.
@@ -2203,43 +1626,18 @@ def check_using_std(clean_lines, line_number, file_state, error):
           "Use 'using namespace std;' instead of 'using std::%s;'." % method_name)
 
 
-def check_using_namespace(clean_lines, line_number, file_extension, error):
-    """Looks for 'using namespace foo;' which should be removed.
+def check_max_min_macros(file_extension, clean_lines, line_number, error):
+    """Looks use of MAX() and MIN() macros that should be replaced with std::max() and std::min().
 
     Args:
+      file_extension: The extension of the current file, without the leading dot.
       clean_lines: A CleansedLines instance containing the file.
       line_number: The number of the line to check.
-      file_extension: The extension (dot not included) of the file.
-      error: The function to call with any errors found.
-    """
-
-    # This check applies only to headers.
-    if file_extension != 'h':
-        return
-
-    line = clean_lines.elided[line_number]  # Get rid of comments and strings.
-
-    using_namespace_match = match(r'\s*using\s+namespace\s+(?P<method_name>\S+)\s*;\s*$', line)
-    if not using_namespace_match:
-        return
-
-    method_name = using_namespace_match.group('method_name')
-    error(line_number, 'build/using_namespace', 4,
-          "Do not use 'using namespace %s;'." % method_name)
-
-def check_max_min_macros(clean_lines, line_number, file_state, error):
-    """Looks for use of MAX() and MIN() macros that should be replaced with std::max() and std::min().
-
-    Args:
-      clean_lines: A CleansedLines instance containing the file.
-      line_number: The number of the line to check.
-      file_state: A _FileState instance which maintains information about
-                  the state of things in the file.
       error: The function to call with any errors found.
     """
 
     # This check doesn't apply to C or Objective-C implementation files.
-    if file_state.is_c_or_objective_c():
+    if is_c_or_objective_c(file_extension):
         return
 
     line = clean_lines.elided[line_number] # Get rid of comments and strings.
@@ -2254,53 +1652,6 @@ def check_max_min_macros(clean_lines, line_number, file_state, error):
           'Use std::%s() or std::%s<type>() instead of the %s() macro.'
           % (max_min_macro_lower, max_min_macro_lower, max_min_macro))
 
-
-def check_wtf_move(clean_lines, line_number, file_state, error):
-    """Looks for use of 'std::move()' which should be replaced with 'WTFMove()'.
-
-    Args:
-      clean_lines: A CleansedLines instance containing the file.
-      line_number: The number of the line to check.
-      file_state: A _FileState instance which maintains information about
-                  the state of things in the file.
-      error: The function to call with any errors found.
-    """
-
-    # This check doesn't apply to C or Objective-C implementation files.
-    if file_state.is_c_or_objective_c():
-        return
-
-    line = clean_lines.elided[line_number]  # Get rid of comments and strings.
-
-    using_std_move = search(r'\bstd::move\s*\(', line)
-    if not using_std_move:
-        return
-
-    error(line_number, 'runtime/wtf_move', 4, "Use 'WTFMove()' instead of 'std::move()'.")
-
-
-def check_ctype_functions(clean_lines, line_number, file_state, error):
-    """Looks for use of the standard functions in ctype.h and suggest they be replaced
-       by use of equivilent ones in <wtf/ASCIICType.h>?.
-
-    Args:
-      clean_lines: A CleansedLines instance containing the file.
-      line_number: The number of the line to check.
-      file_state: A _FileState instance which maintains information about
-                  the state of things in the file.
-      error: The function to call with any errors found.
-    """
-
-    line = clean_lines.elided[line_number]  # Get rid of comments and strings.
-
-    ctype_function_search = search(r'\b(?P<ctype_function>(isalnum|isalpha|isascii|isblank|iscntrl|isdigit|isgraph|islower|isprint|ispunct|isspace|isupper|isxdigit|toascii|tolower|toupper))\s*\(', line)
-    if not ctype_function_search:
-        return
-
-    ctype_function = ctype_function_search.group('ctype_function')
-    error(line_number, 'runtime/ctype_function', 4,
-          'Use equivelent function in <wtf/ASCIICType.h> instead of the %s() function.'
-          % (ctype_function))
 
 def check_switch_indentation(clean_lines, line_number, error):
     """Looks for indentation errors inside of switch statements.
@@ -2391,19 +1742,16 @@ def check_braces(clean_lines, line_number, error):
         # perfectly: we just don't complain if the last non-whitespace
         # character on the previous non-blank line is ';', ':', '{', '}',
         # ')', or ') const' and doesn't begin with 'if|for|while|switch|else'.
-        # We also allow '#' for #endif and '=' for array initialization,
-        # and '- (' and '+ (' for Objective-C methods.
+        # We also allow '#' for #endif and '=' for array initialization.
         previous_line = get_previous_non_blank_line(clean_lines, line_number)[0]
-        if ((not search(r'[;:}{)=]\s*$|\)\s*((const|override|const override)\s*)?(->\s*\S+)?\s*$', previous_line)
-             or search(r'\b(if|for|while|switch|else|NS_ENUM)\b', previous_line))
-            and previous_line.find('#') < 0
-            and previous_line.find('- (') != 0
-            and previous_line.find('+ (') != 0):
+        if ((not search(r'[;:}{)=]\s*$|\)\s*const\s*$', previous_line)
+             or search(r'\b(if|for|foreach|while|switch|else)\b', previous_line))
+            and previous_line.find('#') < 0):
             error(line_number, 'whitespace/braces', 4,
                   'This { should be at the end of the previous line')
-    elif (search(r'\)\s*(((const|override)\s*)*\s*)?{\s*$', line)
+    elif (search(r'\)\s*(const\s*)?{\s*$', line)
           and line.count('(') == line.count(')')
-          and not search(r'\b(if|for|while|switch|NS_ENUM)\b', line)
+          and not search(r'\b(if|for|foreach|while|switch)\b', line)
           and not match(r'\s+[A-Z_][A-Z_0-9]+\b', line)):
         error(line_number, 'whitespace/braces', 4,
               'Place brace on its own line for function definitions.')
@@ -2412,9 +1760,8 @@ def check_braces(clean_lines, line_number, error):
         # We check if a closed brace has started a line to see if a
         # one line control statement was previous.
         previous_line = clean_lines.elided[line_number - 2]
-        last_open_brace = previous_line.rfind('{')
-        if (last_open_brace != -1 and previous_line.find('}', last_open_brace) == -1
-            and search(r'\b(if|for|while|else)\b', previous_line)):
+        if (previous_line.find('{') > 0 and previous_line.find('}') < 0
+            and search(r'\b(if|for|foreach|while|else)\b', previous_line)):
             error(line_number, 'whitespace/braces', 4,
                   'One line control clauses should not use braces.')
 
@@ -2434,33 +1781,6 @@ def check_braces(clean_lines, line_number, error):
     if match(r'\s*do [^\s{]', line):
         error(line_number, 'whitespace/newline', 4,
               'do/while clauses should not be on a single line')
-
-    # Multi line control clauses should use braces. We check the
-    # indentation level of the statements.
-    if (match(r'^\s*\b(if|for|while|else)\b\s', line)
-        and match(r'.*[^{]$', line)
-        and len(clean_lines.elided) > line_number + 2):
-        has_braces = False
-        begin_line = line
-        begin_line_number = line_number
-        while (clean_lines.elided[begin_line_number + 1].strip().startswith("&&")
-            or clean_lines.elided[begin_line_number + 1].strip().startswith("||")
-            or search(r'^#\S*', clean_lines.elided[begin_line_number + 1])):
-            begin_line_number = begin_line_number + 1
-            begin_line = clean_lines.elided[begin_line_number]
-            if search(r'.*{$', begin_line):
-                has_braces = True
-
-        next_line = clean_lines.elided[begin_line_number + 1]
-        after_next_line = clean_lines.elided[begin_line_number + 2]
-        control_indent = search(r'^(?P<indentation>\s*).*', line).group('indentation')
-        next_line_indent = search(r'^(?P<indentation>\s*).*', next_line).group('indentation')
-        after_next_line_indent = search(r'^(?P<indentation>\s*).*', after_next_line).group('indentation')
-        if (after_next_line != ''
-            and not has_braces
-            and control_indent < next_line_indent
-            and control_indent < after_next_line_indent):
-            error(line_number, 'whitespace/braces', 4, 'Multi line control clauses should use braces.')
 
     # Braces shouldn't be followed by a ; unless they're defining a struct
     # or initializing an array.
@@ -2640,15 +1960,14 @@ def check_for_comparisons_to_zero(clean_lines, line_number, error):
     line = clean_lines.elided[line_number]
 
     # Include NULL here so that users don't have to convert NULL to 0 first and then get this error.
-    if search(r'[=!]=\s*(NULL|0|true|false)[^\w.]', line) or search(r'[^\w.](NULL|0|true|false)\s*[=!]=', line):
-        if not search('LIKELY', line) and not search('UNLIKELY', line):
-            error(line_number, 'readability/comparison_to_zero', 5,
-                  'Tests for true/false, null/non-null, and zero/non-zero should all be done without equality comparisons.')
+    if search(r'[=!]=\s*(NULL|0|true|false)\W', line) or search(r'\W(NULL|0|true|false)\s*[=!]=', line):
+        error(line_number, 'readability/comparison_to_zero', 5,
+              'Tests for true/false, null/non-null, and zero/non-zero should all be done without equality comparisons.')
 
 
-def check_for_null(clean_lines, line_number, file_state, error):
-    # This check doesn't apply to C, Objective-C, Objective-C++ implementation files.
-    if file_state.is_c() or file_state.is_objective_c_or_objective_cpp():
+def check_for_null(file_extension, clean_lines, line_number, error):
+    # This check doesn't apply to C or Objective-C implementation files.
+    if is_c_or_objective_c(file_extension):
         return
 
     line = clean_lines.elided[line_number]
@@ -2657,26 +1976,20 @@ def check_for_null(clean_lines, line_number, file_state, error):
     if search(r'\bg(_[a-z]+)+\b', line):
         return
 
-    # Don't warn about NULL usage in gst_*(). See Bug 70498.
-    if search(r'\bgst(_[a-z]+)+\b', line):
+    # Don't warn about NULL usage in gst_*_many(). See Bug 39740
+    if search(r'\bgst_\w+_many\b', line):
+        return
+
+    # Don't warn about NULL usage in g_str{join,concat}(). See Bug 34834
+    if search(r'\bg_str(join|concat)\b', line):
         return
 
     # Don't warn about NULL usage in gdk_pixbuf_save_to_*{join,concat}(). See Bug 43090.
     if search(r'\bgdk_pixbuf_save_to\w+\b', line):
         return
 
-    # Don't warn about NULL usage in gtk_widget_style_get(), gtk_style_context_get_style(), or gtk_style_context_get(). See Bug 51758
-    if search(r'\bgtk_widget_style_get\(\w+\b', line) or search(r'\bgtk_style_context_get_style\(\w+\b', line) or search(r'\bgtk_style_context_get\(\w+\b', line):
-        return
-
-    # Don't warn about NULL usage in soup_server_new(). See Bug 77890.
-    if search(r'\bsoup_server_new\(\w+\b', line):
-        return
-
     if search(r'\bNULL\b', line):
-        # FIXME: We should recommend using nullptr instead of NULL in C++ code per
-        # <http://www.webkit.org/coding/coding-style.html#zero-null>.
-        error(line_number, 'readability/null', 5, 'Use nullptr instead of NULL.')
+        error(line_number, 'readability/null', 5, 'Use 0 instead of NULL.')
         return
 
     line = clean_lines.raw_lines[line_number]
@@ -2684,7 +1997,7 @@ def check_for_null(clean_lines, line_number, file_state, error):
     # matches, then do the check with strings collapsed to avoid giving errors for
     # NULLs occurring in strings.
     if search(r'\bNULL\b', line) and search(r'\bNULL\b', CleansedLines.collapse_strings(line)):
-        error(line_number, 'readability/null', 4, 'Use nullptr instead of NULL (even in *comments*).')
+        error(line_number, 'readability/null', 4, 'Use 0 instead of NULL.')
 
 def get_line_width(line):
     """Determines the width of the line in column positions.
@@ -2707,7 +2020,7 @@ def get_line_width(line):
     return len(line)
 
 
-def check_style(clean_lines, line_number, file_extension, class_state, file_state, enum_state, error):
+def check_style(clean_lines, line_number, file_extension, class_state, file_state, error):
     """Checks rules from the 'C++ style rules' section of cppguide.html.
 
     Most of these rules are hard to test (naming, comment style), but we
@@ -2722,7 +2035,6 @@ def check_style(clean_lines, line_number, file_extension, class_state, file_stat
                    the current stack of nested class declarations being parsed.
       file_state: A _FileState instance which maintains information about
                   the state of things in the file.
-      enum_state: A _EnumState instance which maintains the current enum state.
       error: The function to call with any errors found.
     """
 
@@ -2733,10 +2045,44 @@ def check_style(clean_lines, line_number, file_extension, class_state, file_stat
         error(line_number, 'whitespace/tab', 1,
               'Tab found; better to use spaces')
 
+    # One or three blank spaces at the beginning of the line is weird; it's
+    # hard to reconcile that with 4-space indents.
+    # NOTE: here are the conditions rob pike used for his tests.  Mine aren't
+    # as sophisticated, but it may be worth becoming so:  RLENGTH==initial_spaces
+    # if(RLENGTH > 20) complain = 0;
+    # if(match($0, " +(error|private|public|protected):")) complain = 0;
+    # if(match(prev, "&& *$")) complain = 0;
+    # if(match(prev, "\\|\\| *$")) complain = 0;
+    # if(match(prev, "[\",=><] *$")) complain = 0;
+    # if(match($0, " <<")) complain = 0;
+    # if(match(prev, " +for \\(")) complain = 0;
+    # if(prevodd && match(prevprev, " +for \\(")) complain = 0;
+    initial_spaces = 0
     cleansed_line = clean_lines.elided[line_number]
+    while initial_spaces < len(line) and line[initial_spaces] == ' ':
+        initial_spaces += 1
     if line and line[-1].isspace():
         error(line_number, 'whitespace/end_of_line', 4,
               'Line ends in whitespace.  Consider deleting these extra spaces.')
+    # There are certain situations we allow one space, notably for labels
+    elif ((initial_spaces >= 1 and initial_spaces <= 3)
+          and not match(r'\s*\w+\s*:\s*$', cleansed_line)):
+        error(line_number, 'whitespace/indent', 3,
+              'Weird number of spaces at line-start.  '
+              'Are you using a 4-space indent?')
+    # Labels should always be indented at least one space.
+    elif not initial_spaces and line[:2] != '//':
+        label_match = match(r'(?P<label>[^:]+):\s*$', line)
+
+        if label_match:
+            label = label_match.group('label')
+            # Only throw errors for stuff that is definitely not a goto label,
+            # because goto labels can in fact occur at the start of the line.
+            if label in ['public', 'private', 'protected'] or label.find(' ') != -1:
+                error(line_number, 'whitespace/labels', 4,
+                      'Labels should always be indented at least one space.  '
+                      'If this is a member-initializer list in a constructor, '
+                      'the colon should be on the line after the definition header.')
 
     if (cleansed_line.count(';') > 1
         # for loops are allowed two ;'s (and may run over two lines).
@@ -2751,40 +2097,30 @@ def check_style(clean_lines, line_number, file_extension, class_state, file_stat
         and not (match(r'.*\(.*\).*{.*.}', line)
                  and class_state.classinfo_stack
                  and line.count('{') == line.count('}'))
-        and not cleansed_line.startswith('#define ')
-        # It's ok to use use WTF_MAKE_NONCOPYABLE and WTF_MAKE_FAST_ALLOCATED macros in 1 line
-        and not (cleansed_line.find("WTF_MAKE_NONCOPYABLE") != -1
-                 and cleansed_line.find("WTF_MAKE_FAST_ALLOCATED") != -1)):
+        and not cleansed_line.startswith('#define ')):
         error(line_number, 'whitespace/newline', 4,
               'More than one command on the same line')
 
-    if cleansed_line.strip().endswith('||') or cleansed_line.strip().endswith(' &&'):
+    if cleansed_line.strip().endswith('||') or cleansed_line.strip().endswith('&&'):
         error(line_number, 'whitespace/operators', 4,
               'Boolean expressions that span multiple lines should have their '
               'operators on the left side of the line instead of the right side.')
 
     # Some more style checks
     check_namespace_indentation(clean_lines, line_number, file_extension, file_state, error)
-    check_directive_indentation(clean_lines, line_number, file_state, error)
-    check_using_std(clean_lines, line_number, file_state, error)
-    check_using_namespace(clean_lines, line_number, file_extension, error)
-    check_max_min_macros(clean_lines, line_number, file_state, error)
-    check_wtf_move(clean_lines, line_number, file_state, error)
-    check_ctype_functions(clean_lines, line_number, file_state, error)
+    check_using_std(file_extension, clean_lines, line_number, error)
+    check_max_min_macros(file_extension, clean_lines, line_number, error)
     check_switch_indentation(clean_lines, line_number, error)
     check_braces(clean_lines, line_number, error)
     check_exit_statement_simplifications(clean_lines, line_number, error)
     check_spacing(file_extension, clean_lines, line_number, error)
-    check_member_initialization_list(clean_lines, line_number, error)
     check_check(clean_lines, line_number, error)
     check_for_comparisons_to_zero(clean_lines, line_number, error)
-    check_for_null(clean_lines, line_number, file_state, error)
-    check_indentation_amount(clean_lines, line_number, error)
-    check_enum_casing(clean_lines, line_number, enum_state, error)
+    check_for_null(file_extension, clean_lines, line_number, error)
 
 
-_RE_PATTERN_INCLUDE_NEW_STYLE = re.compile(r'#(?:include|import) +"[^/]+\.h"')
-_RE_PATTERN_INCLUDE = re.compile(r'^\s*#\s*(?:include|import)\s*([<"])([^>"]*)[>"].*$')
+_RE_PATTERN_INCLUDE_NEW_STYLE = re.compile(r'#include +"[^/]+\.h"')
+_RE_PATTERN_INCLUDE = re.compile(r'^\s*#\s*include\s*([<"])([^>"]*)[>"].*$')
 # Matches the first component of a filename delimited by -s and _s. That is:
 #  _RE_FIRST_COMPONENT.match('foo').group(0) == 'foo'
 #  _RE_FIRST_COMPONENT.match('foo.cpp').group(0) == 'foo'
@@ -2842,22 +2178,25 @@ def _classify_include(filename, include, is_system, include_state):
     """
 
     # If it is a system header we know it is classified as _OTHER_HEADER.
-    if is_system and not include.startswith('public/'):
+    if is_system:
         return _OTHER_HEADER
 
     # If the include is named config.h then this is WebCore/config.h.
     if include == "config.h":
         return _CONFIG_HEADER
 
-    # If the include is named *SoftLink.h, then it's a soft-link header.
-    if include.endswith('SoftLink.h'):
-        return _SOFT_LINK_HEADER
-
     # There cannot be primary includes in header files themselves. Only an
     # include exactly matches the header filename will be is flagged as
     # primary, so that it triggers the "don't include yourself" check.
     if filename.endswith('.h') and filename != include:
-        return _OTHER_HEADER
+        return _OTHER_HEADER;
+
+    # Qt's moc files do not follow the naming and ordering rules, so they should be skipped
+    if include.startswith('moc_') and include.endswith('.cpp'):
+        return _MOC_HEADER
+
+    if include.endswith('.moc'):
+        return _MOC_HEADER
 
     # If the target file basename starts with the include we're checking
     # then we consider it the primary header.
@@ -2865,10 +2204,8 @@ def _classify_include(filename, include, is_system, include_state):
     include_base = FileInfo(include).base_name()
 
     # If we haven't encountered a primary header, then be lenient in checking.
-    if not include_state.visited_primary_section():
-        if target_base.find(include_base) != -1:
-            return _PRIMARY_HEADER
-
+    if not include_state.visited_primary_section() and target_base.find(include_base) != -1:
+        return _PRIMARY_HEADER
     # If we already encountered a primary header, perform a strict comparison.
     # In case the two filename bases are the same then the above lenient check
     # probably was a false positive.
@@ -2881,17 +2218,6 @@ def _classify_include(filename, include, is_system, include_state):
         return _PRIMARY_HEADER
 
     return _OTHER_HEADER
-
-
-def _does_primary_header_exist(filename):
-    """Return a primary header file name for a file, or empty string
-    if the file is not source file or primary header does not exist.
-    """
-    fileinfo = FileInfo(filename)
-    if not fileinfo.is_source():
-        return False
-    primary_header = fileinfo.no_extension() + ".h"
-    return os.path.isfile(primary_header)
 
 
 def check_include_line(filename, file_extension, clean_lines, line_number, include_state, error):
@@ -2943,7 +2269,6 @@ def check_include_line(filename, file_extension, clean_lines, line_number, inclu
         include_state[include] = line_number
 
     header_type = _classify_include(filename, include, is_system, include_state)
-    primary_header_exists = _does_primary_header_exist(filename)
     include_state.header_types[line_number] = header_type
 
     # Only proceed if this isn't a duplicate header.
@@ -2955,49 +2280,31 @@ def check_include_line(filename, file_extension, clean_lines, line_number, inclu
     # 2) for header files: alphabetically sorted
     # The include_state object keeps track of the last type seen
     # and complains if the header types are out of order or missing.
-    error_message = include_state.check_next_include_order(header_type,
-                                                           filename,
-                                                           file_extension == "h",
-                                                           primary_header_exists)
+    error_message = include_state.check_next_include_order(header_type, file_extension == "h")
 
-    # Check to make sure *SoftLink.h headers always appear last and never in a header.
-    if error_message and include_state.visited_soft_link_section():
-        error(line_number, 'build/include_order', 4, error_message)
-        return
-
-    # Check to make sure we have a blank line after and none before primary header.
+    # Check to make sure we have a blank line after primary header.
     if not error_message and header_type == _PRIMARY_HEADER:
-        next_line = clean_lines.raw_lines[line_number + 1]
-        previous_line = clean_lines.raw_lines[line_number - 1]
-        if not is_blank_line(next_line):
+         next_line = clean_lines.raw_lines[line_number + 1]
+         if not is_blank_line(next_line):
             error(line_number, 'build/include_order', 4,
-                'You should add a blank line after implementation file\'s own header.')
-        if is_blank_line(previous_line):
-            error(line_number, 'build/include_order', 4,
-                'You should not add a blank line before implementation file\'s own header.')
+                  'You should add a blank line after implementation file\'s own header.')
 
     # Check to make sure all headers besides config.h and the primary header are
-    # alphabetically sorted.
-    if not error_message and header_type == _OTHER_HEADER and not search(r'\A#include.*\.lut\.h', line):
-        previous_line_number = line_number - 1
-        previous_line = clean_lines.lines[previous_line_number]
-        previous_match = _RE_PATTERN_INCLUDE.search(previous_line)
-        while (not previous_match and previous_line_number > 0
-               and not search(r'\A(#if|#ifdef|#ifndef|#else|#elif|#endif)', previous_line)):
-            previous_line_number -= 1
+    # alphabetically sorted. Skip Qt's moc files.
+    if not error_message and header_type == _OTHER_HEADER:
+         previous_line_number = line_number - 1;
+         previous_line = clean_lines.lines[previous_line_number]
+         previous_match = _RE_PATTERN_INCLUDE.search(previous_line)
+         while (not previous_match and previous_line_number > 0
+                and not search(r'\A(#if|#ifdef|#ifndef|#else|#elif|#endif)', previous_line)):
+            previous_line_number -= 1;
             previous_line = clean_lines.lines[previous_line_number]
             previous_match = _RE_PATTERN_INCLUDE.search(previous_line)
-        if previous_match:
+         if previous_match:
             previous_header_type = include_state.header_types[previous_line_number]
-            if previous_header_type == _OTHER_HEADER:
-                if '<' in previous_line and '"' in line:
-                    error(line_number, 'build/include_order', 4, 'Bad include order. Mixing system and custom headers.')
-                elif previous_line.strip() > line.strip():
-                    # This type of error is potentially a problem with this line or the previous one,
-                    # so if the error is filtered for one line, report it for the next. This is so that
-                    # we properly handle patches, for which only modified lines produce errors.
-                    if not error(line_number - 1, 'build/include_order', 4, 'Alphabetical sorting problem.'):
-                        error(line_number, 'build/include_order', 4, 'Alphabetical sorting problem.')
+            if previous_header_type == _OTHER_HEADER and previous_line.strip() > line.strip():
+                error(line_number, 'build/include_order', 4,
+                      'Alphabetical sorting problem.')
 
     if error_message:
         if file_extension == 'h':
@@ -3011,7 +2318,7 @@ def check_include_line(filename, file_extension, clean_lines, line_number, inclu
 
 
 def check_language(filename, clean_lines, line_number, file_extension, include_state,
-                   file_state, error):
+                   error):
     """Checks rules from the 'C++ language rules' section of cppguide.html.
 
     Some of these rules are hard to test (function overloading, using
@@ -3023,8 +2330,6 @@ def check_language(filename, clean_lines, line_number, file_extension, include_s
       line_number: The number of the line to check.
       file_extension: The extension (without the dot) of the filename.
       include_state: An _IncludeState instance in which the headers are inserted.
-      file_state: A _FileState instance which maintains information about
-                  the state of things in the file.
       error: The function to call with any errors found.
     """
     # If the line is empty or consists of entirely a comment, no need to
@@ -3096,6 +2401,10 @@ def check_language(filename, clean_lines, line_number, file_extension, include_s
               'Do not use dynamic_cast<>.  If you need to cast within a class '
               "hierarchy, use static_cast<> to upcast.  Google doesn't support "
               'RTTI.')
+
+    if search(r'\b([A-Za-z0-9_]*_)\(\1\)', line):
+        error(line_number, 'runtime/init', 4,
+              'You seem to be initializing a member variable with itself.')
 
     if file_extension == 'h':
         # FIXME: check that 1-arg constructors are explicit.
@@ -3210,39 +2519,108 @@ def check_language(filename, clean_lines, line_number, file_extension, include_s
               'http://google-styleguide.googlecode.com/svn/trunk/cppguide.xml#Namespaces'
               ' for more information.')
 
-    # Check for plain bitfields declared without either "singed" or "unsigned".
-    # Most compilers treat such bitfields as signed, but there are still compilers like
-    # RVCT 4.0 that use unsigned by default.
-    matched = re.match(r'\s*((const|mutable)\s+)?(char|(short(\s+int)?)|int|long(\s+(long|int))?)\s+[a-zA-Z_][a-zA-Z0-9_]*\s*:\s*\d+\s*;', line)
-    if matched:
-        error(line_number, 'runtime/bitfields', 5,
-              'Please declare integral type bitfields with either signed or unsigned.')
+    check_identifier_name_in_declaration_with_capital(filename, line_number, line, error)
 
-    # Beware of using enums as types for bitfields, there can sometimes be a mismatch
-    # between the signedness of the enum and the enum bitfield type.
-    # Visual Studio's 8.0 compiler is an example where it represents bit fields of
-    # enum types with a signed type, but enums as unsigned.
-    matched = re.match(r'\s*((const|mutable)\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s+[a-zA-Z_][a-zA-Z0-9_]*\s*:\s*\d+\s*;', line)
-    if matched:
-        # Make sure the type is an enum and not an integral type
-        if not match(r'bool|char|(short(\s+int)?)|int|long(\s+(long|int))|(signed|unsigned)(\s+int)?', matched.group(3)):
-            error(line_number, 'runtime/enum_bitfields', 5,
-                  'Please declare enum bitfields as unsigned integral types.')
+def check_identifier_name_in_declaration_with_capital(filenam, line_number, line, error):
+    """Check if identifier names contain any capital.
+    
+    """
+    # We don't check a return statement.
+    if match(r'\s*(return|delete)\b', line):
+        return
 
-    check_identifier_name_in_declaration(filename, line_number, line, file_state, error)
+    # Basically, a declaration is a type name followed by whitespaces
+    # followed by an identifier. The type name can be complicated
+    # due to type adjectives and templates. We remove them first to
+    # simplify the process to find declarations of identifiers.
 
-    # Check for unsigned int (should be just 'unsigned')
-    if search(r'\bunsigned int\b', line):
-        error(line_number, 'runtime/unsigned', 1,
-              'Omit int when using unsigned')
+    # Convert "long long", "long double", and "long long int" to
+    # simple types, but don't remove simple "long".
+    line = sub(r'long (long )?(?=long|double|int)', '', line)
+    # Convert unsigned/signed types to simple types, too.
+    line = sub(r'(unsigned|signed) (?=char|short|int|long)', '', line)
+    line = sub(r'\b(inline|using|static|const|volatile|auto|register|extern|typedef|restrict|struct|class|virtual)(?=\W)', '', line)
 
-    # Check that we're not using static_cast<Text*>.
-    if search(r'\bstatic_cast<Text\*>', line):
-        error(line_number, 'readability/check', 4,
-              'Consider using toText helper function in WebCore/dom/Text.h '
-              'instead of static_cast<Text*>')
+    # Remove "new" and "new (expr)" to simplify, too.
+    line = sub(r'new\s*(\([^)]*\))?', '', line)
 
-def check_identifier_name_in_declaration(filename, line_number, line, file_state, error):
+    # Remove all template parameters by removing matching < and >.
+    # Loop until no templates are removed to remove nested templates.
+    while True:
+        line, number_of_replacements = subn(r'<([\w\s:]|::)+\s*[*&]*\s*>', '', line)
+        if not number_of_replacements:
+            break
+
+    # Declarations of local variables can be in condition expressions
+    # of control flow statements (e.g., "if (RenderObject* p = o->parent())").
+    # We remove the keywords and the first parenthesis.
+    #
+    # Declarations in "while", "if", and "switch" are different from
+    # other declarations in two aspects:
+    #
+    # - There can be only one declaration between the parentheses.
+    #   (i.e., you cannot write "if (int i = 0, j = 1) {}")
+    # - The variable must be initialized.
+    #   (i.e., you cannot write "if (int i) {}")
+    #
+    # and we will need different treatments for them.
+    line = sub(r'^\s*for\s*\(', '', line)
+    line, control_statement = subn(r'^\s*(while|else if|if|switch)\s*\(', '', line)
+
+    # Detect variable and functions.
+    type_regexp = r'\w([\w]|\s*[*&]\s*|::)+'
+    identifier_regexp = r'(?P<identifier>[\w:]+)'
+    maybe_bitfield_regexp = r'(:\s*\d+\s*)?'
+    character_after_identifier_regexp = r'(?P<character_after_identifier>[[;()=,])(?!=)'
+    declaration_without_type_regexp = r'\s*' + identifier_regexp + r'\s*' + maybe_bitfield_regexp + character_after_identifier_regexp
+    declaration_with_type_regexp = r'\s*' + type_regexp + r'\s' + declaration_without_type_regexp
+    is_function_arguments = False
+    number_of_identifiers = 0
+    while True:
+        # If we are seeing the first identifier or arguments of a
+        # function, there should be a type name before an identifier.
+        if not number_of_identifiers or is_function_arguments:
+            declaration_regexp = declaration_with_type_regexp
+        else:
+            declaration_regexp = declaration_without_type_regexp
+
+        matched = match(declaration_regexp, line)
+        if not matched:
+            return
+        identifier = matched.group('identifier')
+        character_after_identifier = matched.group('character_after_identifier')
+
+        # If we removed a non-for-control statement, the character after
+        # the identifier should be '='. With this rule, we can avoid
+        # warning for cases like "if (val & INT_MAX) {".
+        if control_statement and character_after_identifier != '=':
+            return
+
+        is_function_arguments = is_function_arguments or character_after_identifier == '('
+
+        # Remove "m_" and "s_" to allow them.
+        modified_identifier = sub(r'(^|(?<=::))[ms]_', '', identifier)
+		
+	if any(x.isupper() for x in modified_identifier):
+            error(line_number, 'readability/naming', 4, identifier + " is incorrectly named. Don't use capital latter in your identifier names.")
+
+        # Check for variables named 'l', these are too easy to confuse with '1' in some fonts
+        if modified_identifier == 'l':
+            error(line_number, 'readability/naming', 4, identifier + " is incorrectly named. Don't use the single letter 'l' as an identifier name.")
+
+        # There can be only one declaration in non-for-control statements.
+        if control_statement:
+            return
+        # We should continue checking if this is a function
+        # declaration because we need to check its arguments.
+        # Also, we need to check multiple declarations.
+        if character_after_identifier != '(' and character_after_identifier != ',':
+            return
+
+        number_of_identifiers += 1
+        line = line[matched.end():]
+
+def check_identifier_name_in_declaration(filename, line_number, line, error):
     """Checks if identifier names contain any underscores.
 
     As identifiers in libraries we are using have a bunch of
@@ -3253,8 +2631,6 @@ def check_identifier_name_in_declaration(filename, line_number, line, file_state
       filename: The name of the current file.
       line_number: The number of the line to check.
       line: The line of code to check.
-      file_state: A _FileState instance which maintains information about
-                  the state of things in the file.
       error: The function to call with any errors found.
     """
     # We don't check a return statement.
@@ -3306,15 +2682,12 @@ def check_identifier_name_in_declaration(filename, line_number, line, file_state
     character_after_identifier_regexp = r'(?P<character_after_identifier>[[;()=,])(?!=)'
     declaration_without_type_regexp = r'\s*' + identifier_regexp + r'\s*' + maybe_bitfield_regexp + character_after_identifier_regexp
     declaration_with_type_regexp = r'\s*' + type_regexp + r'\s' + declaration_without_type_regexp
-    constructor_regexp = r'\s*([\w_]*::)*(?P<pre_part>[\w_]+)::(?P<post_part>[\w_]+)[(]'
     is_function_arguments = False
     number_of_identifiers = 0
     while True:
         # If we are seeing the first identifier or arguments of a
         # function, there should be a type name before an identifier.
-        constructor_check = match(constructor_regexp, line)
-        is_constructor = constructor_check and constructor_check.group('pre_part') == constructor_check.group('post_part')
-        if not is_constructor and (not number_of_identifiers or is_function_arguments):
+        if not number_of_identifiers or is_function_arguments:
             declaration_regexp = declaration_with_type_regexp
         else:
             declaration_regexp = declaration_without_type_regexp
@@ -3335,28 +2708,20 @@ def check_identifier_name_in_declaration(filename, line_number, line, file_state
 
         # Remove "m_" and "s_" to allow them.
         modified_identifier = sub(r'(^|(?<=::))[ms]_', '', identifier)
-        if not file_state.is_objective_c_or_objective_cpp() and modified_identifier.find('_') >= 0:
+        if modified_identifier.find('_') >= 0:
             # Various exceptions to the rule: JavaScript op codes functions, const_iterator.
-            if (not (filename.find('JavaScriptCore') >= 0 and (modified_identifier.find('op_') >= 0 or modified_identifier.find('intrinsic_') >= 0))
-                and not (filename.find('gtk') >= 0 and modified_identifier.startswith('webkit_') >= 0)
+            if (not (filename.find('JavaScriptCore') >= 0 and modified_identifier.find('op_') >= 0)
                 and not modified_identifier.startswith('tst_')
                 and not modified_identifier.startswith('webkit_dom_object_')
-                and not modified_identifier.startswith('webkit_soup')
                 and not modified_identifier.startswith('NPN_')
                 and not modified_identifier.startswith('NPP_')
                 and not modified_identifier.startswith('NP_')
-                and not modified_identifier.startswith('_q_')
+                and not modified_identifier.startswith('qt_')
                 and not modified_identifier.startswith('cairo_')
-                and not modified_identifier.startswith('Ecore_')
-                and not modified_identifier.startswith('Eina_')
-                and not modified_identifier.startswith('Evas_')
-                and not modified_identifier.startswith('Ewk_')
-                and not modified_identifier.startswith('cti_')
-                and not modified_identifier.find('::_q_') >= 0
+                and not modified_identifier.find('::qt_') >= 0
                 and not modified_identifier == "const_iterator"
-                and not modified_identifier == "vm_throw"
-                and not modified_identifier == "DFG_OPERATION"):
-                error(line_number, 'readability/naming/underscores', 4, identifier + " is incorrectly named. Don't use underscores in your identifier names.")
+                and not modified_identifier == "vm_throw"):
+                error(line_number, 'readability/naming', 4, identifier + " is incorrectly named. Don't use underscores in your identifier names.")
 
         # Check for variables named 'l', these are too easy to confuse with '1' in some fonts
         if modified_identifier == 'l':
@@ -3557,7 +2922,6 @@ def update_include_state(filename, include_state, io=codecs):
     Returns:
       True if a header was succesfully added. False otherwise.
     """
-    io = _unit_test_config.get(INCLUDE_IO_INJECTION_KEY, codecs)
     header_file = None
     try:
         header_file = io.open(filename, 'r', 'utf8', 'replace')
@@ -3576,7 +2940,8 @@ def update_include_state(filename, include_state, io=codecs):
     return True
 
 
-def check_for_include_what_you_use(filename, clean_lines, include_state, error):
+def check_for_include_what_you_use(filename, clean_lines, include_state, error,
+                                   io=codecs):
     """Reports for missing stl includes.
 
     This function will output warnings to make sure you are including the headers
@@ -3590,6 +2955,8 @@ def check_for_include_what_you_use(filename, clean_lines, include_state, error):
       clean_lines: A CleansedLines instance containing the file.
       include_state: An _IncludeState instance.
       error: The function to call with any errors found.
+      io: The IO factory to use to read the header file. Provided for unittest
+          injection.
     """
     required = {}  # A map of header name to line_number and the template entity.
         # Example of required: { '<functional>': (1219, 'less<>') }
@@ -3640,7 +3007,7 @@ def check_for_include_what_you_use(filename, clean_lines, include_state, error):
     for header in include_state.keys():  #NOLINT
         (same_module, common_path) = files_belong_to_same_module(abs_filename, header)
         fullpath = common_path + header
-        if same_module and update_include_state(fullpath, include_state):
+        if same_module and update_include_state(fullpath, include_state, io):
             header_found = True
 
     # If we can't find the header file for a .cpp, assume it's because we don't
@@ -3664,16 +3031,9 @@ def check_for_include_what_you_use(filename, clean_lines, include_state, error):
                   'Add #include ' + required_header_unstripped + ' for ' + template)
 
 
-def check_platformh_comments(lines, error):
-    for line_number, line in enumerate(lines):
-        if line_number not in (0, len(lines) - 1):
-            if line.find("//") != -1:
-                error(line_number, 'build/cpp_comment', 5, 'CPP comments are not allowed in Platform.h, '
-                                                           'please use C comments /* ... */')
-
 def process_line(filename, file_extension,
                  clean_lines, line, include_state, function_state,
-                 class_state, file_state, enum_state, asm_state, error):
+                 class_state, file_state, error):
     """Processes a single line in the file.
 
     Args:
@@ -3688,9 +3048,6 @@ def process_line(filename, file_extension,
                    the current stack of nested class declarations being parsed.
       file_state: A _FileState instance which maintains information about
                   the state of things in the file.
-      enum_state: A _EnumState instance which maintains an enum declaration
-                  state.
-      asm_state: The state of inline ASM code.
       error: A callable to which errors are reported, which takes arguments:
              line number, error level, and message
 
@@ -3700,35 +3057,14 @@ def process_line(filename, file_extension,
     check_for_function_lengths(clean_lines, line, function_state, error)
     if search(r'\bNOLINT\b', raw_lines[line]):  # ignore nolint lines
         return
-    if match(r'\s*\b__asm\b', raw_lines[line]):  # Ignore asm lines as they format differently.
-        return
-    asm_state.process_line(raw_lines[line])
-    if asm_state.is_in_asm():  # Ignore further checks because asm blocks formatted differently.
-        return
-    check_function_definition(filename, file_extension, clean_lines, line, function_state, error)
-    check_for_leaky_patterns(clean_lines, line, function_state, error)
+    check_pass_ptr_usage(clean_lines, line, function_state, error)
     check_for_multiline_comments_and_strings(clean_lines, line, error)
-    check_style(clean_lines, line, file_extension, class_state, file_state, enum_state, error)
+    check_style(clean_lines, line, file_extension, class_state, file_state, error)
     check_language(filename, clean_lines, line, file_extension, include_state,
-                   file_state, error)
+                   error)
     check_for_non_standard_constructs(clean_lines, line, class_state, error)
     check_posix_threading(clean_lines, line, error)
     check_invalid_increment(clean_lines, line, error)
-
-
-class _InlineASMState(object):
-    """Stores the state for the inline asm codes."""
-    def __init__(self):
-        self._is_in_asm = False
-
-    def process_line(self, line):
-        if match(r'\s*asm\s+(volatile)?\(', line):
-            self._is_in_asm = True
-        elif search(r'\);$', line) and self._is_in_asm:  # Can not do more without a proper parser (or lexer).
-            self._is_in_asm = False
-
-    def is_in_asm(self):
-        return self._is_in_asm
 
 
 def _process_lines(filename, file_extension, lines, error, min_confidence):
@@ -3747,23 +3083,18 @@ def _process_lines(filename, file_extension, lines, error, min_confidence):
     include_state = _IncludeState()
     function_state = _FunctionState(min_confidence)
     class_state = _ClassState()
+    file_state = _FileState()
 
     check_for_copyright(lines, error)
 
     if file_extension == 'h':
         check_for_header_guard(filename, lines, error)
-        if filename == 'Source/WTF/wtf/Platform.h':
-            check_platformh_comments(lines, error)
 
     remove_multi_line_comments(lines, error)
     clean_lines = CleansedLines(lines)
-    file_state = _FileState(clean_lines, file_extension)
-    enum_state = _EnumState()
-    asm_state = _InlineASMState()
     for line in xrange(clean_lines.num_lines()):
         process_line(filename, file_extension, clean_lines, line,
-                     include_state, function_state, class_state, file_state,
-                     enum_state, asm_state, error)
+                     include_state, function_state, class_state, file_state, error)
     class_state.check_finished(error)
 
     check_for_include_what_you_use(filename, clean_lines, include_state, error)
@@ -3772,8 +3103,7 @@ def _process_lines(filename, file_extension, lines, error, min_confidence):
     # lines rather than "cleaned" lines.
     check_for_unicode_replacement_characters(lines, error)
 
-    check_for_missing_new_line_at_eof(lines, error)
-    check_for_extra_new_line_at_eof(lines, error)
+    check_for_new_line_at_eof(lines, error)
 
 
 class CppChecker(object):
@@ -3799,8 +3129,6 @@ class CppChecker(object):
         'build/printf_format',
         'build/storage_class',
         'build/using_std',
-        'build/using_namespace',
-        'build/cpp_comment',
         'legal/copyright',
         'readability/braces',
         'readability/casting',
@@ -3808,29 +3136,22 @@ class CppChecker(object):
         'readability/comparison_to_zero',
         'readability/constructors',
         'readability/control_flow',
-        'readability/enum_casing',
         'readability/fn_size',
         'readability/function',
         'readability/multiline_comment',
         'readability/multiline_string',
-        'readability/parameter_name',
         'readability/naming',
-        'readability/naming/underscores',
         'readability/null',
+        'readability/pass_ptr',
         'readability/streams',
         'readability/todo',
         'readability/utf8',
-        'readability/webkit_export',
         'runtime/arrays',
-        'runtime/bitfields',
         'runtime/casting',
-        'runtime/ctype_function',
-        'runtime/enum_bitfields',
         'runtime/explicit',
         'runtime/init',
         'runtime/int',
         'runtime/invalid_increment',
-        'runtime/leaky_pattern',
         'runtime/max_min_macros',
         'runtime/memset',
         'runtime/printf',
@@ -3840,24 +3161,19 @@ class CppChecker(object):
         'runtime/sizeof',
         'runtime/string',
         'runtime/threadsafe_fn',
-        'runtime/unsigned',
         'runtime/virtual',
-        'runtime/wtf_move',
         'whitespace/blank_line',
         'whitespace/braces',
-        'whitespace/brackets',
-        'whitespace/colon',
         'whitespace/comma',
         'whitespace/comments',
         'whitespace/declaration',
         'whitespace/end_of_line',
         'whitespace/ending_newline',
         'whitespace/indent',
-        'whitespace/init',
+        'whitespace/labels',
         'whitespace/line_length',
         'whitespace/newline',
         'whitespace/operators',
-        'whitespace/property',
         'whitespace/parens',
         'whitespace/semicolon',
         'whitespace/tab',
@@ -3865,7 +3181,7 @@ class CppChecker(object):
         ])
 
     def __init__(self, file_path, file_extension, handle_style_error,
-                 min_confidence, unit_test_config={}):
+                 min_confidence):
         """Create a CppChecker instance.
 
         Args:
@@ -3873,12 +3189,10 @@ class CppChecker(object):
                           the leading dot.
 
         """
-        global _unit_test_config
         self.file_extension = file_extension
         self.file_path = file_path
         self.handle_style_error = handle_style_error
         self.min_confidence = min_confidence
-        _unit_test_config = unit_test_config
 
     # Useful for unit testing.
     def __eq__(self, other):
@@ -3902,3 +3216,9 @@ class CppChecker(object):
     def check(self, lines):
         _process_lines(self.file_path, self.file_extension, lines,
                        self.handle_style_error, self.min_confidence)
+
+
+# FIXME: Remove this function (requires refactoring unit tests).
+def process_file_data(filename, file_extension, lines, error, min_confidence):
+    checker = CppChecker(filename, file_extension, error, min_confidence)
+    checker.check(lines)
